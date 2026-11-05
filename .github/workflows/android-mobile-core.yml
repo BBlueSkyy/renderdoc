@@ -83,3 +83,11 @@ jobs:
           path: renderdoc-android-arm64-core.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload RenderDoc command APK (not the Mobile UI)
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderdoc-command-arm64-apk
+          path: build-android-arm64/bin/org.renderdoc.renderdoccmd.arm64.apk
+          if-no-files-found: error
+          retention-days: 7
