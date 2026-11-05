@@ -1,0 +1,85 @@
+name: RenderDoc Mobile - Android ARM64 core
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/renderdoc-mobile-arm64-bootstrap
+    paths:
+      - .github/workflows/android-mobile-core.yml
+      - CMakeLists.txt
+      - renderdoc/**
+
+permissions:
+  contents: read
+
+jobs:
+  android-arm64:
+    name: Build upstream Android core (arm64-v8a)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 8 (upstream toolchain requirement)
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '8'
+
+      - name: Install upstream Android build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libncurses5 unzip
+          curl --fail --location --retry 3 --silent --show-error \
+            https://dl.google.com/android/repository/sdk-tools-linux-3859397.zip -o sdk-tools.zip
+          curl --fail --location --retry 3 --silent --show-error \
+            https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip -o ndk-r14b.zip
+          mkdir -p "$RUNNER_TEMP/renderdoc-android-sdk"
+          unzip -q sdk-tools.zip -d "$RUNNER_TEMP/renderdoc-android-sdk"
+          unzip -q ndk-r14b.zip -d "$RUNNER_TEMP"
+          echo "ANDROID_HOME=$RUNNER_TEMP/renderdoc-android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK=$RUNNER_TEMP/android-ndk-r14b" >> "$GITHUB_ENV"
+          # The legacy sdkmanager uses Java 8. Use yes for license prompts.
+          set +o pipefail
+          yes | "$RUNNER_TEMP/renderdoc-android-sdk/tools/bin/sdkmanager" \
+            --sdk_root="$RUNNER_TEMP/renderdoc-android-sdk" \
+            "build-tools;26.0.1" "platforms;android-23"
+          status=${PIPESTATUS[1]}
+          set -o pipefail
+          exit "$status"
+
+      - name: Configure Android ARM64
+        run: |
+          cmake -S . -B build-android-arm64 \
+            -DBUILD_ANDROID=On \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_NATIVE_API_LEVEL=23 \
+            -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build RenderDoc native core
+        run: cmake --build build-android-arm64 --parallel 2
+
+      - name: Verify and package native output
+        shell: bash
+        run: |
+          set -euo pipefail
+          find build-android-arm64/lib build-android-arm64/bin \
+            -type f 2>/dev/null | sort || true
+          if ! find build-android-arm64/lib -type f -name '*.so' -print -quit | grep -q .; then
+            echo "::error::Android ARM64 build did not produce a shared library"
+            exit 1
+          fi
+          tar -czf renderdoc-android-arm64-core.tar.gz \
+            -C build-android-arm64 lib bin
+
+      - name: Upload ARM64 native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderdoc-android-arm64-core
+          path: renderdoc-android-arm64-core.tar.gz
+          if-no-files-found: error
+          retention-days: 7
