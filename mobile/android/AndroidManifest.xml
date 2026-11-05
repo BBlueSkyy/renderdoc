@@ -2,7 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.renderdoc.mobile">
     <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="28" />
-    <application android:allowBackup="false"
+    <application android:debuggable="true" android:extractNativeLibs="true" android:allowBackup="false"
         android:label="RenderDoc Mobile"
         android:hasCode="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
@@ -14,5 +14,9 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <activity android:name=".DemoCaptureActivity"
+            android:exported="false"
+            android:process=":vulkan_demo"
+            android:label="Vulkan Capture Test"/>
     </application>
 </manifest>

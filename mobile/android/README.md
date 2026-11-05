@@ -41,3 +41,10 @@ product.
    works on device.
 
 RenderDoc is licensed under MIT; see the root `LICENSE.md`.
+
+
+## Offscreen Vulkan test (experimental v0.2.0)
+
+Choose **Generate Vulkan test .rdc** to run a real Vulkan image clear and GPU readback in a separate Android process. The test uses RenderDoc's in-application API to start/end capture. It only reports success if RenderDoc registers a nonempty .rdc file under app-specific storage; it does not fabricate one. The result can be opened in the existing native capture inspector or exported with Android's document picker.
+
+Known limitations: whether the Android Vulkan loader enumerates the APK-bundled capture layer varies with Android version and debug settings. On unsupported setups the test will show a diagnostic instead of claiming that capture works. This is an offscreen clear/copy test, **not** Strato capture, Vulkan replay or draw call analysis. Validate on-device before treating it as working.

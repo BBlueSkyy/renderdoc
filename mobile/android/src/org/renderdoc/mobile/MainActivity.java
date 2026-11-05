@@ -93,6 +93,20 @@ public final class MainActivity extends Activity {
             @Override public void onClick(View v) { selectCapture(); }
         });
 
+        Button demoButton = new Button(this);
+        demoButton.setText("Generate Vulkan test .rdc");
+        demoButton.setAllCaps(false);
+        demoButton.setTextColor(Color.WHITE);
+        LinearLayout.LayoutParams demoParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
+        demoParams.topMargin = dp(10);
+        page.addView(demoButton, demoParams);
+        demoButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, DemoCaptureActivity.class));
+            }
+        });
+
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(16), dp(16), dp(18));
@@ -126,6 +140,8 @@ public final class MainActivity extends Activity {
                 "app storage; no network permission is requested.", 12, MUTED, false);
         footer.setPadding(0, dp(18), 0, 0);
         page.addView(footer);
+
+        if (getIntent() != null) openGeneratedCapture(getIntent());
 
         if (NATIVE_LOAD_ERROR != null) {
             status.setText("Native library unavailable");
@@ -277,6 +293,81 @@ public final class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        openGeneratedCapture(intent);
+    }
+
+    private void openGeneratedCapture(Intent intent) {
+        final String path = intent.getStringExtra("generated_capture_path");
+        if (path == null || path.length() == 0) return;
+        intent.removeExtra("generated_capture_path");
+        final File file = new File(path);
+        final File directory = getExternalFilesDir("captures");
+        try {
+            if (directory == null || !file.getCanonicalPath().startsWith(
+                    directory.getCanonicalPath() + File.separator)) {
+                status.setText("Rejected capture path outside app storage.");
+                return;
+            }
+        } catch (IOException failure) {
+            status.setText("Cannot validate generated capture path.");
+            return;
+        }
+        status.setText("Reading generated .rdc…");
+        details.setText(file.getName());
+        thumbnail.setVisibility(View.GONE);
+        openButton.setEnabled(false);
+        executor.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    final String[] result = inspectCapture(file.getAbsolutePath());
+                    if (result == null || result.length < 6)
+                        throw new IOException("Native metadata was incomplete.");
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (closing) return;
+                            openButton.setEnabled(true);
+                            if (!"ok".equals(result[0])) {
+                                status.setText("Failed to open generated capture");
+                                details.setText(result[1]);
+                                return;
+                            }
+                            status.setText("Generated .rdc opened successfully");
+                            details.setText("File: " + file.getName() +
+                                    "\nSize: " + formatBytes(file.length()) +
+                                    "\nGraphics API: " + result[1] +
+                                    "\nRecorded machine: " + result[2] +
+                                    "\nReplay support hint: " + result[3] +
+                                    "\n\nSections:\n" + result[4] +
+                                    "\n\nFrame replay is not enabled yet.");
+                            if (result[5] != null && !result[5].isEmpty()) {
+                                try {
+                                    byte[] bytes = Base64.decode(result[5], Base64.NO_WRAP);
+                                    Bitmap image = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                                    if (image != null) {
+                                        thumbnail.setImageBitmap(image);
+                                        thumbnail.setVisibility(View.VISIBLE);
+                                    }
+                                } catch (IllegalArgumentException ignored) { }
+                            }
+                        }
+                    });
+                } catch (final Throwable failure) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (closing) return;
+                            openButton.setEnabled(true);
+                            status.setText("Native capture inspection failed");
+                            details.setText(failure.toString());
+                        }
+                    });
+                }
+            }
+        });
     }
 
     private String formatBytes(long bytes) {
