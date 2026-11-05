@@ -33,6 +33,9 @@ set_target_properties(renderdoc_mobile_jni PROPERTIES
 add_library(renderdoc_replay_marker SHARED replay_marker.cpp)
 target_link_libraries(renderdoc_replay_marker PRIVATE dl)
 set_target_properties(renderdoc_replay_marker PROPERTIES
+    # Android 23+ defaults to RTLD_LOCAL. DF_1_GLOBAL makes the replay
+    # marker visible to RenderDoc's constructor even before JNI calls.
+    LINK_FLAGS "-Wl,-z,global"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 # Real Vulkan replay bridge in a dedicated Android process.

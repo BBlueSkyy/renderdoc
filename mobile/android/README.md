@@ -42,3 +42,5 @@ If the `Vulkan frame replay` screen disappears as soon as `Opening capture on th
 ## v0.3.2: correct replay bootstrap
 
 RenderDoc requires the `renderdoc__replay__marker` symbol globally visible before `libVkLayer_GLES_RenderDoc.so` loads. Without it, the core mistakenly initialises as a capture app and hooks graphics APIs. The Android `:replay` process now first loads `librenderdoc_replay_marker.so`, promotes the marker via `dlopen(RTLD_GLOBAL)`, verifies it with `dlsym(RTLD_DEFAULT)`, **then** loads the replay JNI library and its RenderDoc core dependency. An unavailable marker is reported instead of starting broken GPU replay. This mode transition is isolated from the normal capture and metadata-inspection processes.
+
+Android NDK guidance explains that `RTLD_LOCAL` is the default from API 23. The marker bootstrap is linked with `-Wl,-z,global` (ELF `DF_1_GLOBAL`), making its symbol visible to `dlsym(RTLD_DEFAULT, ...)` even when originally loaded through Android `System.loadLibrary`. The APK build verifies both the exported symbol and global ELF flag before packaging. This is intentionally independent from RenderDoc core and only applies to `:replay`.

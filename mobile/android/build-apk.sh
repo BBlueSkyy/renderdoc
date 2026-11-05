@@ -29,6 +29,16 @@ cmake -S "$APP/native" -B "$BUILD/native" \
   -DCMAKE_BUILD_TYPE=Debug
 cmake --build "$BUILD/native" --parallel 2
 
+# Validate replay-mode registration before shipping an APK:
+# the ELF symbol and DT_FLAGS_1 GLOBAL flag must both be present.
+MARKER="$BUILD/native/lib/librenderdoc_replay_marker.so"
+readelf -Ws "$MARKER" | grep -q "renderdoc__replay__marker" || {
+  echo "Replay marker symbol missing from bootstrap library" >&2; exit 1;
+}
+readelf -d "$MARKER" | grep -q "GLOBAL" || {
+  echo "Replay marker library not exported to Android's global linker group" >&2; exit 1;
+}
+
 STAGE="$BUILD/package"
 mkdir -p "$STAGE/gen" "$STAGE/obj" "$STAGE/bin" "$STAGE/libs/lib/arm64-v8a"
 
