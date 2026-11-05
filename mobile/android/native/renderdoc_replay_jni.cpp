@@ -34,6 +34,7 @@ struct ActionRow {
   uint32_t eventId;
   uint32_t depth;
   std::string name;
+  std::vector<ResourceId> colourOutputs;
 };
 
 std::mutex replayMutex;
@@ -148,7 +149,10 @@ void flatten(const rdcarray<ActionDescription> &children, uint32_t depth, const 
     for(char &c : name)
       if(c == '\n' || c == '\r' || c == '\t')
         c = ' ';
-    actions.push_back({a.eventId, depth, name});
+    ActionRow row{a.eventId, depth, name, {}};
+    for(const ResourceId out : a.outputs)
+      if(out != ResourceId()) row.colourOutputs.push_back(out);
+    actions.push_back(std::move(row));
     if(!a.children.empty())
       flatten(a.children, depth + 1, structured);
     if(actions.size() >= 200000)
@@ -563,6 +567,61 @@ std::ofstream aiFile(const std::string &folder, const char *name)
 }
 } // namespace
 
+
+namespace {
+bool aiHDRTexture(const TextureDescription &tex)
+{
+  return tex.format.compType == CompType::Float ||
+         tex.format.type == ResourceFormatType::R11G11B10 ||
+         tex.format.type == ResourceFormatType::R9G9B9E5 ||
+         tex.format.type == ResourceFormatType::BC6;
+}
+
+bool aiBCMaterial(const TextureDescription &tex)
+{
+  return tex.format.type == ResourceFormatType::BC1 ||
+         tex.format.type == ResourceFormatType::BC5;
+}
+
+const TextureDescription *aiFindTexture(const rdcarray<TextureDescription> &all, ResourceId id)
+{
+  for(const auto &tex : all)
+    if(tex.resourceId == id) return &tex;
+  return nullptr;
+}
+
+// SaveTexture performs all format handling on RenderDoc's replay thread.
+// The PNG is only an SDR visualisation of HDR values. EXR preserves linear
+// floating-point values (when the driver supports exporting them).
+std::string aiSaveImage(const std::string &folder, const std::string &basename,
+                        const TextureDescription &tex, FileType type, size_t maxFileBytes)
+{
+  const std::string suffix = type == FileType::PNG ? ".png" :
+                             type == FileType::EXR ? ".exr" :
+                             type == FileType::DDS ? ".dds" : ".bin";
+  const std::string filename = basename + suffix;
+  TextureSave params{};
+  params.resourceId = tex.resourceId;
+  params.destType = type;
+  params.mip = 0;
+  params.slice.sliceIndex = 0;
+  params.comp.blackPoint = 0.0f;
+  params.comp.whitePoint = aiHDRTexture(tex) && type == FileType::PNG ? 8.0f : 1.0f;
+  const std::string fullpath = folder + "/" + filename;
+  checkpoint("AI export: SaveTexture begin");
+  const ResultDetails result = controller->SaveTexture(params, fullpath.c_str());
+  checkpoint("AI export: SaveTexture returned");
+  struct stat st{};
+  if(!result.OK() || stat(fullpath.c_str(), &st) != 0 ||
+     st.st_size <= 0 || (uint64_t)st.st_size > maxFileBytes)
+  {
+    std::remove(fullpath.c_str());
+    return std::string();
+  }
+  return filename;
+}
+} // namespace
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
                                                         jstring outputDirectory)
@@ -581,7 +640,8 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   const size_t maxActions = 50000, maxResources = 20000;
   const size_t maxTextures = 12000, maxBuffers = 12000;
   const size_t maxUsageTextures = 64, maxUsageBuffers = 32;
-  const size_t maxSnapshots = 16, maxShaderDisassemblies = 4;
+  const size_t maxSnapshots = 16, maxShaderDisassemblies = 8;
+  const size_t maxHDRPairs = 3, maxBCAsssets = 8, maxFragmentBinaries = 8;
 
   const auto &resources = controller->GetResources();
   const auto &textures = controller->GetTextures();
@@ -595,10 +655,15 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   std::ofstream pipeline = aiFile(folder, "pipeline-samples.jsonl");
   std::ofstream shaders = aiFile(folder, "shader-disassembly.jsonl");
   std::ofstream messages = aiFile(folder, "debug-messages.jsonl");
+  std::ofstream descriptorDetails = aiFile(folder, "descriptor-details.jsonl");
+  std::ofstream hdrSnapshots = aiFile(folder, "hdr-snapshots.jsonl");
+  std::ofstream materialTextures = aiFile(folder, "material-textures.jsonl");
+  std::ofstream shaderArtifacts = aiFile(folder, "shader-artifacts.jsonl");
   std::ofstream manifest = aiFile(folder, "manifest.json");
   std::ofstream readme = aiFile(folder, "README.txt");
   if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
-     !pipeline || !shaders || !messages || !manifest || !readme)
+     !pipeline || !shaders || !messages || !descriptorDetails ||
+     !hdrSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
     return env->NewStringUTF("ERROR:Could not create all output files");
 
   readme <<
@@ -613,6 +678,13 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     "descriptor set counts, push constants and pipeline IDs.\n"
     "shader-disassembly.jsonl: up to 4 shader disassemblies if supported.\n"
     "debug-messages.jsonl: messages available from RenderDoc replay.\n"
+    "descriptor-details.jsonl: accessed Vulkan descriptor contents at sampled events.\n"
+    "hdr-snapshots.jsonl: selected HDR render target PNG + EXR before/after draws.\n"
+    "material-textures.jsonl: selected BC1/BC5 material views and DDS/PNG content.\n"
+    "shader-artifacts.jsonl: selected original fragment SPIR-V/binary metadata.\n"
+    "PNG is a [0,8] SDR preview; EXR may preserve HDR. BC DDS preserves blocks.\n"
+    "Some textures are not exportable; empty filename means SaveTexture failed.\n"
+    "Snapshot PRE is after the preceding recorded action, not exact pixel history.\n"
     "LIMITATIONS: Not every draw call is replayed during export. Captures from\n"
     "different boots are not automatically aligned. A Vulkan ResourceId cannot\n"
     "be equated with a Switch TIC, IOVA, shader hash or guest region without\n"
@@ -719,18 +791,141 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     sampleIndices.insert(candidates[(i * (candidates.size() - 1)) / 7]);
   // Iterate in event order and avoid gratuitous seeks.
   size_t disassemblyCount = 0;
-  std::set<std::string> disassembled;
+  size_t hdrPairsExported = 0, bcAssetsExported = 0, fragmentBinariesExported = 0;
+  size_t descriptorRows = 0;
+  std::set<std::string> disassembled, savedShaders, savedMaterials;
   size_t snapshotCount = 0;
   for(size_t idx : sampleIndices)
   {
     if(snapshotCount >= maxSnapshots) break;
     const ActionRow &a = actions[idx];
+    // Capture the nearest *preceding action's* post-state and the selected
+    // draw's post-state. These pairs identify changes but do not give exact
+    // per-pixel write history or prove which draw caused the discrepancy.
+    if(hdrPairsExported < maxHDRPairs && idx > 0 && !a.colourOutputs.empty() &&
+       a.name.find("Draw") != std::string::npos)
+    {
+      for(const ResourceId target : a.colourOutputs)
+      {
+        if(hdrPairsExported >= maxHDRPairs) break;
+        const TextureDescription *tex = aiFindTexture(textures, target);
+        if(!tex || !aiHDRTexture(*tex) ||
+           tex->width > 2048 || tex->height > 2048 ||
+           tex->depth != 1 || tex->byteSize > 32ULL * 1024ULL * 1024ULL)
+          continue;
+        const uint32_t beforeId = actions[idx - 1].eventId;
+        const std::string base = "snapshot_" + std::to_string(a.eventId) +
+                                 "_" + aiId(target).substr(2);
+        checkpoint("AI export: before HDR draw");
+        controller->SetFrameEvent(beforeId, false);
+        const std::string beforePNG = aiSaveImage(folder, base + "_before", *tex,
+                                                   FileType::PNG, 8 * 1024 * 1024);
+        const std::string beforeEXR = aiSaveImage(folder, base + "_before", *tex,
+                                                   FileType::EXR, 32 * 1024 * 1024);
+        checkpoint("AI export: after HDR draw");
+        controller->SetFrameEvent(a.eventId, false);
+        const std::string afterPNG = aiSaveImage(folder, base + "_after", *tex,
+                                                  FileType::PNG, 8 * 1024 * 1024);
+        const std::string afterEXR = aiSaveImage(folder, base + "_after", *tex,
+                                                  FileType::EXR, 32 * 1024 * 1024);
+        hdrSnapshots << "{\"event_id\":" << a.eventId
+                     << ",\"prior_action_event_id\":" << beforeId
+                     << ",\"texture_id\":" << aiQuote(aiId(target))
+                     << ",\"format\":" << aiQuote(tex->format.Name().c_str())
+                     << ",\"before_png\":" << aiQuote(beforePNG)
+                     << ",\"after_png\":" << aiQuote(afterPNG)
+                     << ",\"before_exr\":" << aiQuote(beforeEXR)
+                     << ",\"after_exr\":" << aiQuote(afterEXR)
+                     << ",\"png_white_point\":8.0,\"note\":\"before=after previous recorded action\"}\n";
+        ++hdrPairsExported;
+      }
+    }
     checkpoint("AI export: SetFrameEvent entering");
     controller->SetFrameEvent(a.eventId, false);
     checkpoint("AI export: SetFrameEvent returned");
     const VKPipe::State *state = controller->GetVulkanPipelineState();
     if(!state) continue;
     const auto &accesses = controller->GetDescriptorAccess();
+    // Full values for the accessed descriptors, bounded per sampled event.
+    // Avoid equating "staticallyUnused=false" with proven dynamic use.
+    size_t emittedAtEvent = 0;
+    for(const DescriptorAccess &access : accesses)
+    {
+      if(emittedAtEvent++ >= 128) break;
+      descriptorDetails << "{\"event_id\":" << a.eventId
+                        << ",\"stage\":" << (uint32_t)access.stage
+                        << ",\"descriptor_type\":" << (uint32_t)access.type
+                        << ",\"shader_binding_index\":" << access.index
+                        << ",\"array_element\":" << access.arrayElement
+                        << ",\"store_id\":" << aiQuote(aiId(access.descriptorStore))
+                        << ",\"store_offset\":" << access.byteOffset
+                        << ",\"store_byte_size\":" << access.byteSize
+                        << ",\"statically_unused\":" << (access.staticallyUnused ? "true" : "false");
+      if(access.descriptorStore != ResourceId() && access.byteSize > 0 &&
+         access.byteSize <= 4096)
+      {
+        rdcarray<DescriptorRange> ranges;
+        ranges.push_back(DescriptorRange(access));
+        const auto descriptors = controller->GetDescriptors(access.descriptorStore, ranges);
+        if(!descriptors.empty())
+        {
+          const Descriptor &d = descriptors[0];
+          descriptorDetails << ",\"bound\":{\"type\":" << (uint32_t)d.type
+                            << ",\"resource_id\":" << aiQuote(aiId(d.resource))
+                            << ",\"secondary_id\":" << aiQuote(aiId(d.secondary))
+                            << ",\"view_id\":" << aiQuote(aiId(d.view))
+                            << ",\"format\":" << aiQuote(d.format.Name().c_str())
+                            << ",\"offset\":" << d.byteOffset
+                            << ",\"size\":" << d.byteSize
+                            << ",\"first_mip\":" << (uint32_t)d.firstMip
+                            << ",\"mip_count\":" << (uint32_t)d.numMips
+                            << ",\"first_slice\":" << d.firstSlice
+                            << ",\"slice_count\":" << d.numSlices << "}";
+          const TextureDescription *texture = aiFindTexture(textures, d.resource);
+          if(texture && aiBCMaterial(*texture) &&
+             bcAssetsExported < maxBCAsssets &&
+             texture->byteSize <= 16ULL * 1024ULL * 1024ULL)
+          {
+            const std::string id = aiId(texture->resourceId);
+            if(savedMaterials.insert(id).second)
+            {
+              const std::string base = "material_" + id.substr(2);
+              checkpoint("AI export: BC1/BC5 material");
+              const std::string dds = aiSaveImage(folder, base, *texture,
+                                                  FileType::DDS, 20 * 1024 * 1024);
+              const std::string png = aiSaveImage(folder, base, *texture,
+                                                  FileType::PNG, 8 * 1024 * 1024);
+              materialTextures << "{\"event_id\":" << a.eventId
+                               << ",\"resource_id\":" << aiQuote(id)
+                               << ",\"view_id\":" << aiQuote(aiId(d.view))
+                               << ",\"descriptor_type\":" << (uint32_t)d.type
+                               << ",\"format\":" << aiQuote(texture->format.Name().c_str())
+                               << ",\"dds\":" << aiQuote(dds)
+                               << ",\"png\":" << aiQuote(png)
+                               << ",\"note\":\"DDS intended to preserve compressed mip0 blocks\"}\n";
+              ++bcAssetsExported;
+            }
+          }
+        }
+        const auto locations = controller->GetDescriptorLocations(access.descriptorStore, ranges);
+        if(!locations.empty())
+          descriptorDetails << ",\"logical_binding\":" << locations[0].fixedBindNumber
+                            << ",\"logical_name\":" << aiQuote(locations[0].logicalBindName.c_str());
+        if(access.type == DescriptorType::Sampler || access.type == DescriptorType::ImageSampler)
+        {
+          const auto samplers = controller->GetSamplerDescriptors(access.descriptorStore, ranges);
+          if(!samplers.empty())
+            descriptorDetails << ",\"sampler\":{\"id\":"
+                              << aiQuote(aiId(samplers[0].object))
+                              << ",\"lod_min\":" << samplers[0].minLOD
+                              << ",\"lod_max\":" << samplers[0].maxLOD
+                              << ",\"anisotropy\":" << samplers[0].maxAnisotropy << "}";
+        }
+      }
+      descriptorDetails << "}\n";
+      ++descriptorRows;
+    }
+
     pipeline << "{\"event_id\":" << a.eventId
              << ",\"action\":" << aiQuote(a.name)
              << ",\"graphics_pipeline_id\":" << aiQuote(aiId(state->graphics.pipelineResourceId))
@@ -745,6 +940,58 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
              << "}\n";
     ++snapshotCount;
 
+    // Save original shader bytes and reflection bindings, not just disassembly
+    // text. Original bytes are sourced from RenderDoc's reflection, not guessed.
+    const VKPipe::Shader &frag = state->fragmentShader;
+    if(frag.reflection && fragmentBinariesExported < maxFragmentBinaries)
+    {
+      const auto *refl = frag.reflection;
+      const std::string shaderId = aiId(frag.resourceId);
+      if(savedShaders.insert(shaderId).second)
+      {
+        const bool isSpirv = refl->encoding == ShaderEncoding::SPIRV ||
+                             refl->encoding == ShaderEncoding::OpenGLSPIRV;
+        std::string binaryName;
+        if(!refl->rawBytes.empty() && refl->rawBytes.size() <= 4 * 1024 * 1024)
+        {
+          binaryName = "fragment_" + shaderId.substr(2) +
+                       (isSpirv ? ".spv" : ".shaderbin");
+          std::ofstream rawShader = aiFile(folder, binaryName.c_str());
+          rawShader.write((const char *)refl->rawBytes.data(), refl->rawBytes.size());
+          rawShader.close();
+          if(!rawShader) binaryName.clear();
+        }
+        shaderArtifacts << "{\"event_id\":" << a.eventId
+                        << ",\"fragment_shader_id\":" << aiQuote(shaderId)
+                        << ",\"entry_point\":" << aiQuote(frag.entryPoint.c_str())
+                        << ",\"encoding\":" << (uint32_t)refl->encoding
+                        << ",\"binary_file\":" << aiQuote(binaryName)
+                        << ",\"shader_bytes\":" << refl->rawBytes.size()
+                        << ",\"read_only_bindings\":[";
+        for(size_t i = 0; i < refl->readOnlyResources.size() && i < 256; ++i)
+        {
+          const auto &bind = refl->readOnlyResources[i];
+          if(i) shaderArtifacts << ",";
+          shaderArtifacts << "{\"name\":" << aiQuote(bind.name.c_str())
+                          << ",\"set\":" << bind.fixedBindSetOrSpace
+                          << ",\"binding\":" << bind.fixedBindNumber
+                          << ",\"descriptor_type\":" << (uint32_t)bind.descriptorType
+                          << ",\"array_size\":" << bind.bindArraySize << "}";
+        }
+        shaderArtifacts << "],\"read_write_bindings\":[";
+        for(size_t i = 0; i < refl->readWriteResources.size() && i < 256; ++i)
+        {
+          const auto &bind = refl->readWriteResources[i];
+          if(i) shaderArtifacts << ",";
+          shaderArtifacts << "{\"name\":" << aiQuote(bind.name.c_str())
+                          << ",\"set\":" << bind.fixedBindSetOrSpace
+                          << ",\"binding\":" << bind.fixedBindNumber
+                          << ",\"descriptor_type\":" << (uint32_t)bind.descriptorType << "}";
+        }
+        shaderArtifacts << "]}\n";
+        ++fragmentBinariesExported;
+      }
+    }
     const VKPipe::Shader *selected[] = {
       &state->vertexShader, &state->fragmentShader, &state->computeShader,
     };
@@ -806,6 +1053,10 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
            << "\"usage_buffers_sampled\":" << std::min(buffers.size(), maxUsageBuffers) << ","
            << "\"pipelines_sampled\":" << snapshotCount << ","
            << "\"shaders_disassembled\":" << disassemblyCount << ","
+           << "\"hdr_draw_pairs_attempted\":" << hdrPairsExported << ","
+           << "\"bc_material_textures_attempted\":" << bcAssetsExported << ","
+           << "\"fragment_shader_binaries_attempted\":" << fragmentBinariesExported << ","
+           << "\"accessed_descriptors_exported\":" << descriptorRows << ","
            << "\"full_event_pipeline_coverage\":false,"
            << "\"strato_guest_resource_correlation\":false,"
            << "\"original_rdc_embedded\":false}\n";
@@ -813,9 +1064,11 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   // Explicitly flush/check all files before telling Java the ZIP is ready.
   events.flush(); resourceFile.flush(); textureFile.flush(); bufferFile.flush();
   uses.flush(); pipeline.flush(); shaders.flush(); messages.flush();
+  descriptorDetails.flush(); hdrSnapshots.flush(); materialTextures.flush(); shaderArtifacts.flush();
   manifest.flush(); readme.flush();
   if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
-     !pipeline || !shaders || !messages || !manifest || !readme)
+     !pipeline || !shaders || !messages || !descriptorDetails ||
+     !hdrSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
     return env->NewStringUTF("ERROR:Filesystem error while writing diagnostic files");
 
   checkpoint("AI export: files complete");
