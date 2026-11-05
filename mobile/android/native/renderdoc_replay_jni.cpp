@@ -882,27 +882,40 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
                             << ",\"first_slice\":" << d.firstSlice
                             << ",\"slice_count\":" << d.numSlices << "}";
           const TextureDescription *texture = aiFindTexture(textures, d.resource);
-          if(texture && aiBCMaterial(*texture) &&
+          // If Strato software-decompressed guest BC1/BC5, Vulkan sees an
+          // RGBA8/RG8 image. Sample those named guest textures as material
+          // previews too, but NEVER label their host bytes as original BC blocks.
+          bool namedGuestImage{};
+          if(texture)
+            for(const auto &resource : resources)
+              if(resource.resourceId == texture->resourceId &&
+                 std::string(resource.name.c_str()).find("STRATO TIC=") == 0)
+              { namedGuestImage = true; break; }
+          if(texture && (aiBCMaterial(*texture) || namedGuestImage) &&
              bcAssetsExported < maxBCAsssets &&
              texture->byteSize <= 16ULL * 1024ULL * 1024ULL)
           {
             const std::string id = aiId(texture->resourceId);
             if(savedMaterials.insert(id).second)
             {
+              const bool nativeBC = aiBCMaterial(*texture);
               const std::string base = "material_" + id.substr(2);
-              checkpoint("AI export: BC1/BC5 material");
-              const std::string dds = aiSaveImage(folder, base, *texture,
-                                                  FileType::DDS, 20 * 1024 * 1024);
+              checkpoint("AI export: bound material texture");
+              const std::string dds = nativeBC
+                ? aiSaveImage(folder, base, *texture, FileType::DDS, 20 * 1024 * 1024)
+                : std::string();
               const std::string png = aiSaveImage(folder, base, *texture,
                                                   FileType::PNG, 8 * 1024 * 1024);
               materialTextures << "{\"event_id\":" << a.eventId
                                << ",\"resource_id\":" << aiQuote(id)
                                << ",\"view_id\":" << aiQuote(aiId(d.view))
                                << ",\"descriptor_type\":" << (uint32_t)d.type
-                               << ",\"format\":" << aiQuote(texture->format.Name().c_str())
+                               << ",\"host_format\":" << aiQuote(texture->format.Name().c_str())
+                               << ",\"native_bc_blocks_available\":" << (nativeBC ? "true" : "false")
+                               << ",\"strato_tic_name_present\":" << (namedGuestImage ? "true" : "false")
                                << ",\"dds\":" << aiQuote(dds)
                                << ",\"png\":" << aiQuote(png)
-                               << ",\"note\":\"DDS intended to preserve compressed mip0 blocks\"}\n";
+                               << ",\"note\":\"If guest BC was decoded before Vulkan, original guest compressed blocks are NOT in this RDC image\"}\n";
               ++bcAssetsExported;
             }
           }
