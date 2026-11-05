@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.renderdoc.mobile">
-    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="28" />
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="28" />
     <application android:debuggable="true" android:extractNativeLibs="true" android:allowBackup="false"
         android:label="RenderDoc Mobile"
         android:hasCode="true"
