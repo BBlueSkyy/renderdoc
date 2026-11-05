@@ -17,6 +17,11 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <fstream>
+#include <set>
+#include <sstream>
+#include <cstdio>
+#include <cstdint>
 #include <vector>
 
 #include "replay/renderdoc_replay.h"
@@ -477,6 +482,347 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeTexturePreview(JNIEnv *env, jclas
   if(!result)
     lastPreviewError = "Failed to create Java RGBA8 preview buffer";
   return result;
+}
+
+
+/*
+ * Machine-readable diagnostic export for offline AI-assisted GPU debugging.
+ * Exports analysis metadata from ACTUAL RenderDoc replay. This does not infer
+ * guest IOVA/TIC, GPU causality or missing writes from captured Vulkan state.
+ * Bounded event/resource iteration and 16 event seeks protect Android memory.
+ */
+namespace {
+std::string aiQuote(const std::string &value)
+{
+  std::string result;
+  result.reserve(value.size() + 8);
+  result += '"';
+  for(unsigned char c : value)
+  {
+    if(c == '"') result += "\\\"";
+    else if(c == '\\') result += "\\\\";
+    else if(c == '\n') result += "\\n";
+    else if(c == '\r') result += "\\r";
+    else if(c == '\t') result += "\\t";
+    else if(c < 32)
+    {
+      char code[7];
+      snprintf(code, sizeof(code), "\\u%04x", (unsigned)c);
+      result += code;
+    }
+    else result += (char)c;
+  }
+  result += '"';
+  return result;
+}
+
+std::string aiId(ResourceId id)
+{
+  static_assert(sizeof(ResourceId) == sizeof(uint64_t), "Unexpected ResourceId size");
+  uint64_t value = 0;
+  memcpy(&value, &id, sizeof(value));
+  char result[32]{};
+  snprintf(result, sizeof(result), "0x%016llx", (unsigned long long)value);
+  return result;
+}
+
+std::string aiIds(const rdcarray<ResourceId> &ids, size_t limit = 32)
+{
+  std::string value = "[";
+  for(size_t i = 0; i < ids.size() && i < limit; ++i)
+  {
+    if(i) value += ",";
+    value += aiQuote(aiId(ids[i]));
+  }
+  return value + "]";
+}
+
+std::string aiU32s(const rdcarray<uint32_t> &values, size_t limit = 32)
+{
+  std::string value = "[";
+  for(size_t i = 0; i < values.size() && i < limit; ++i)
+  {
+    if(i) value += ",";
+    value += std::to_string(values[i]);
+  }
+  return value + "]";
+}
+
+std::string aiShader(const VKPipe::Shader &shader)
+{
+  return "{\"id\":" + aiQuote(aiId(shader.resourceId)) +
+         ",\"entry_point\":" + aiQuote(shader.entryPoint.c_str()) +
+         ",\"stage\":" + std::to_string((uint32_t)shader.stage) +
+         ",\"specialization_bytes\":" + std::to_string(shader.specializationData.size()) +
+         ",\"subgroup_size\":" + std::to_string(shader.requiredSubgroupSize) + "}";
+}
+
+std::ofstream aiFile(const std::string &folder, const char *name)
+{
+  return std::ofstream(folder + "/" + name, std::ios::binary | std::ios::trunc);
+}
+} // namespace
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
+                                                        jstring outputDirectory)
+{
+  std::lock_guard<std::mutex> lock(replayMutex);
+  if(!controller)
+    return env->NewStringUTF("ERROR:Replay is not open; no GPU diagnostics exported");
+
+  const std::string folder = utf8(env, outputDirectory);
+  struct stat info{};
+  if(folder.empty() || folder[0] != '/' || folder.size() > 2048 ||
+     stat(folder.c_str(), &info) != 0 || !S_ISDIR(info.st_mode))
+    return env->NewStringUTF("ERROR:Invalid diagnostics output folder");
+
+  checkpoint("AI export: start");
+  const size_t maxActions = 50000, maxResources = 20000;
+  const size_t maxTextures = 12000, maxBuffers = 12000;
+  const size_t maxUsageTextures = 64, maxUsageBuffers = 32;
+  const size_t maxSnapshots = 16, maxShaderDisassemblies = 4;
+
+  const auto &resources = controller->GetResources();
+  const auto &textures = controller->GetTextures();
+  const auto &buffers = controller->GetBuffers();
+
+  std::ofstream events = aiFile(folder, "events.jsonl");
+  std::ofstream resourceFile = aiFile(folder, "resources.jsonl");
+  std::ofstream textureFile = aiFile(folder, "textures.jsonl");
+  std::ofstream bufferFile = aiFile(folder, "buffers.jsonl");
+  std::ofstream uses = aiFile(folder, "resource-usage.jsonl");
+  std::ofstream pipeline = aiFile(folder, "pipeline-samples.jsonl");
+  std::ofstream shaders = aiFile(folder, "shader-disassembly.jsonl");
+  std::ofstream messages = aiFile(folder, "debug-messages.jsonl");
+  std::ofstream manifest = aiFile(folder, "manifest.json");
+  std::ofstream readme = aiFile(folder, "README.txt");
+  if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
+     !pipeline || !shaders || !messages || !manifest || !readme)
+    return env->NewStringUTF("ERROR:Could not create all output files");
+
+  readme <<
+    "RenderDoc Mobile - AI Vulkan diagnostics (schema 1)\n"
+    "The original .rdc is NOT included. Share it separately if possible.\n"
+    "All JSONL files contain exactly one JSON object per line.\n"
+    "events.jsonl: recorded RenderDoc action IDs and labels; IDs are per capture.\n"
+    "resources.jsonl: RenderDoc resources, initialization chunks, parent/derived IDs.\n"
+    "textures.jsonl / buffers.jsonl: replay resource dimensions and allocations.\n"
+    "resource-usage.jsonl: selected textures/buffers with their recorded event usages.\n"
+    "pipeline-samples.jsonl: up to 16 actual replayed Vulkan events with shaders,\n"
+    "descriptor set counts, push constants and pipeline IDs.\n"
+    "shader-disassembly.jsonl: up to 4 shader disassemblies if supported.\n"
+    "debug-messages.jsonl: messages available from RenderDoc replay.\n"
+    "LIMITATIONS: Not every draw call is replayed during export. Captures from\n"
+    "different boots are not automatically aligned. A Vulkan ResourceId cannot\n"
+    "be equated with a Switch TIC, IOVA, shader hash or guest region without\n"
+    "independent instrumentation in Strato. These records alone do not prove\n"
+    "memory barriers, resource authority, races or the root cause of corruption.\n"
+    "Data may contain game assets, shaders and debug names. Inspect before sharing.\n";
+
+  checkpoint("AI export: events and resources");
+  for(size_t i = 0; i < actions.size() && i < maxActions; ++i)
+  {
+    const ActionRow &a = actions[i];
+    events << "{\"event_id\":" << a.eventId << ",\"depth\":" << a.depth
+           << ",\"name\":" << aiQuote(a.name) << "}\n";
+  }
+
+  for(size_t i = 0; i < resources.size() && i < maxResources; ++i)
+  {
+    const ResourceDescription &r = resources[i];
+    resourceFile << "{\"id\":" << aiQuote(aiId(r.resourceId))
+                 << ",\"type\":" << (uint32_t)r.type
+                 << ",\"name\":" << aiQuote(r.name.c_str())
+                 << ",\"autogenerated_name\":" << (r.autogeneratedName ? "true" : "false")
+                 << ",\"initialization_chunks\":" << aiU32s(r.initialisationChunks)
+                 << ",\"parent_resources\":" << aiIds(r.parentResources)
+                 << ",\"derived_resources\":" << aiIds(r.derivedResources)
+                 << "}\n";
+  }
+
+  for(size_t i = 0; i < textures.size() && i < maxTextures; ++i)
+  {
+    const TextureDescription &t = textures[i];
+    textureFile << "{\"id\":" << aiQuote(aiId(t.resourceId))
+                << ",\"width\":" << t.width << ",\"height\":" << t.height
+                << ",\"depth\":" << t.depth << ",\"mips\":" << t.mips
+                << ",\"array_size\":" << t.arraysize << ",\"samples\":" << t.msSamp
+                << ",\"format\":" << aiQuote(t.format.Name().c_str())
+                << ",\"byte_size\":" << t.byteSize
+                << ",\"memory_id\":" << aiQuote(aiId(t.memory))
+                << ",\"memory_offset\":" << t.memoryOffset
+                << ",\"creation_flags\":" << (uint64_t)t.creationFlags
+                << "}\n";
+  }
+
+  for(size_t i = 0; i < buffers.size() && i < maxBuffers; ++i)
+  {
+    const BufferDescription &b = buffers[i];
+    bufferFile << "{\"id\":" << aiQuote(aiId(b.resourceId))
+               << ",\"byte_length\":" << b.length
+               << ",\"vulkan_gpu_address\":" << b.gpuAddress
+               << ",\"memory_id\":" << aiQuote(aiId(b.memory))
+               << ",\"memory_offset\":" << b.memoryOffset
+               << ",\"creation_flags\":" << (uint64_t)b.creationFlags
+               << "}\n";
+  }
+
+  checkpoint("AI export: sampled resource usages");
+  // Representative selection, not a complete per-resource history.
+  std::set<size_t> textureUsageIndices;
+  for(size_t i = 0; i < textures.size() && i < maxUsageTextures / 2; ++i)
+    textureUsageIndices.insert(i);
+  std::vector<size_t> largest;
+  for(size_t i = 0; i < textures.size(); ++i) largest.push_back(i);
+  const size_t top = std::min(largest.size(), maxUsageTextures / 2);
+  std::partial_sort(largest.begin(), largest.begin() + top, largest.end(),
+                    [&](size_t a, size_t b){ return textures[a].byteSize > textures[b].byteSize; });
+  for(size_t i = 0; i < top; ++i) textureUsageIndices.insert(largest[i]);
+
+  auto writeUsage = [&](ResourceId id, const char *kind) {
+    const auto usageList = controller->GetUsage(id);
+    uses << "{\"resource_id\":" << aiQuote(aiId(id))
+         << ",\"kind\":" << aiQuote(kind)
+         << ",\"total_usages\":" << usageList.size() << ",\"events\":[";
+    for(size_t i = 0; i < usageList.size() && i < 4096; ++i)
+    {
+      if(i) uses << ",";
+      uses << "{\"event_id\":" << usageList[i].eventId
+           << ",\"usage_code\":" << (uint32_t)usageList[i].usage << "}";
+    }
+    uses << "]}\n";
+  };
+
+  for(size_t idx : textureUsageIndices)
+    writeUsage(textures[idx].resourceId, "texture");
+  for(size_t i = 0; i < buffers.size() && i < maxUsageBuffers; ++i)
+    writeUsage(buffers[i].resourceId, "buffer");
+
+  checkpoint("AI export: Vulkan pipeline samples");
+  std::vector<size_t> candidates;
+  // Prefer actual draw/dispatch operations, fall back to the full action list.
+  for(size_t i = 0; i < actions.size(); ++i)
+    if(actions[i].name.find("Draw") != std::string::npos ||
+       actions[i].name.find("Dispatch") != std::string::npos)
+      candidates.push_back(i);
+  if(candidates.empty())
+    for(size_t i = 0; i < actions.size(); ++i) candidates.push_back(i);
+
+  std::set<size_t> sampleIndices;
+  for(size_t i = 0; i < candidates.size() && i < 4; ++i)
+    sampleIndices.insert(candidates[i]);
+  for(size_t i = (candidates.size() > 4 ? candidates.size() - 4 : 0);
+      i < candidates.size(); ++i)
+    sampleIndices.insert(candidates[i]);
+  for(size_t i = 0; i < 8 && !candidates.empty(); ++i)
+    sampleIndices.insert(candidates[(i * (candidates.size() - 1)) / 7]);
+  // Iterate in event order and avoid gratuitous seeks.
+  size_t disassemblyCount = 0;
+  std::set<std::string> disassembled;
+  size_t snapshotCount = 0;
+  for(size_t idx : sampleIndices)
+  {
+    if(snapshotCount >= maxSnapshots) break;
+    const ActionRow &a = actions[idx];
+    checkpoint("AI export: SetFrameEvent entering");
+    controller->SetFrameEvent(a.eventId, false);
+    checkpoint("AI export: SetFrameEvent returned");
+    const VKPipe::State *state = controller->GetVulkanPipelineState();
+    if(!state) continue;
+    const auto &accesses = controller->GetDescriptorAccess();
+    pipeline << "{\"event_id\":" << a.eventId
+             << ",\"action\":" << aiQuote(a.name)
+             << ",\"graphics_pipeline_id\":" << aiQuote(aiId(state->graphics.pipelineResourceId))
+             << ",\"compute_pipeline_id\":" << aiQuote(aiId(state->compute.pipelineResourceId))
+             << ",\"graphics_descriptor_sets\":" << state->graphics.descriptorSets.size()
+             << ",\"compute_descriptor_sets\":" << state->compute.descriptorSets.size()
+             << ",\"descriptor_accesses\":" << accesses.size()
+             << ",\"push_constant_bytes\":" << state->pushconsts.size()
+             << ",\"vertex_shader\":" << aiShader(state->vertexShader)
+             << ",\"fragment_shader\":" << aiShader(state->fragmentShader)
+             << ",\"compute_shader\":" << aiShader(state->computeShader)
+             << "}\n";
+    ++snapshotCount;
+
+    const VKPipe::Shader *selected[] = {
+      &state->vertexShader, &state->fragmentShader, &state->computeShader,
+    };
+    for(const VKPipe::Shader *stage : selected)
+    {
+      if(disassemblyCount >= maxShaderDisassemblies || !stage->reflection)
+        continue;
+      const std::string shaderId = aiId(stage->resourceId);
+      if(shaderId == aiId(ResourceId()) || !disassembled.insert(shaderId).second)
+        continue;
+      const ResourceId pipe = stage == &state->computeShader
+                            ? state->compute.pipelineResourceId
+                            : state->graphics.pipelineResourceId;
+      checkpoint("AI export: shader disassembly entering");
+      const rdcstr result = controller->DisassembleShader(pipe, stage->reflection, rdcstr());
+      checkpoint("AI export: shader disassembly returned");
+      const std::string text(result.c_str());
+      const size_t keep = std::min(text.size(), (size_t)128 * 1024);
+      shaders << "{\"shader_id\":" << aiQuote(shaderId)
+              << ",\"event_id\":" << a.eventId
+              << ",\"entry_point\":" << aiQuote(stage->entryPoint.c_str())
+              << ",\"text\":" << aiQuote(text.substr(0, keep))
+              << ",\"truncated\":" << (text.size() > keep ? "true" : "false") << "}\n";
+      ++disassemblyCount;
+    }
+    const ResultDetails fatal = controller->GetFatalErrorStatus();
+    if(!fatal.OK())
+    {
+      pipeline << "{\"error\":" << aiQuote(replayErrorText(fatal))
+               << ",\"after_event\":" << a.eventId << "}\n";
+      break;
+    }
+  }
+
+  checkpoint("AI export: debug messages");
+  const auto debugList = controller->GetDebugMessages();
+  for(size_t i = 0; i < debugList.size() && i < 1000; ++i)
+  {
+    const DebugMessage &m = debugList[i];
+    messages << "{\"event_id\":" << m.eventId << ",\"message_id\":" << m.messageID
+             << ",\"category\":" << (uint32_t)m.category
+             << ",\"severity\":" << (uint32_t)m.severity
+             << ",\"source\":" << (uint32_t)m.source
+             << ",\"description\":" << aiQuote(m.description.c_str()) << "}\n";
+  }
+
+  manifest << "{\n"
+           << "\"schema\":1,\"source\":\"RenderDoc native Vulkan replay\","
+           << "\"complete\":true,"
+           << "\"actions_total\":" << actions.size() << ","
+           << "\"actions_exported\":" << std::min(actions.size(), maxActions) << ","
+           << "\"resources_total\":" << resources.size() << ","
+           << "\"resources_exported\":" << std::min(resources.size(), maxResources) << ","
+           << "\"textures_total\":" << textures.size() << ","
+           << "\"textures_exported\":" << std::min(textures.size(), maxTextures) << ","
+           << "\"buffers_total\":" << buffers.size() << ","
+           << "\"buffers_exported\":" << std::min(buffers.size(), maxBuffers) << ","
+           << "\"usage_textures_sampled\":" << textureUsageIndices.size() << ","
+           << "\"usage_buffers_sampled\":" << std::min(buffers.size(), maxUsageBuffers) << ","
+           << "\"pipelines_sampled\":" << snapshotCount << ","
+           << "\"shaders_disassembled\":" << disassemblyCount << ","
+           << "\"full_event_pipeline_coverage\":false,"
+           << "\"strato_guest_resource_correlation\":false,"
+           << "\"original_rdc_embedded\":false}\n";
+
+  // Explicitly flush/check all files before telling Java the ZIP is ready.
+  events.flush(); resourceFile.flush(); textureFile.flush(); bufferFile.flush();
+  uses.flush(); pipeline.flush(); shaders.flush(); messages.flush();
+  manifest.flush(); readme.flush();
+  if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
+     !pipeline || !shaders || !messages || !manifest || !readme)
+    return env->NewStringUTF("ERROR:Filesystem error while writing diagnostic files");
+
+  checkpoint("AI export: files complete");
+  const std::string summary = "ok: " + std::to_string(actions.size()) + " actions, " +
+                              std::to_string(textures.size()) + " textures, " +
+                              std::to_string(snapshotCount) + " pipeline samples";
+  return env->NewStringUTF(summary.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
