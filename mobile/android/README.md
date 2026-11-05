@@ -44,3 +44,30 @@ If the `Vulkan frame replay` screen disappears as soon as `Opening capture on th
 RenderDoc requires the `renderdoc__replay__marker` symbol globally visible before `libVkLayer_GLES_RenderDoc.so` loads. Without it, the core mistakenly initialises as a capture app and hooks graphics APIs. The Android `:replay` process now first loads `librenderdoc_replay_marker.so`, promotes the marker via `dlopen(RTLD_GLOBAL)`, verifies it with `dlsym(RTLD_DEFAULT)`, **then** loads the replay JNI library and its RenderDoc core dependency. An unavailable marker is reported instead of starting broken GPU replay. This mode transition is isolated from the normal capture and metadata-inspection processes.
 
 Android NDK guidance explains that `RTLD_LOCAL` is the default from API 23. The marker bootstrap is linked with `-Wl,-z,global` (ELF `DF_1_GLOBAL`), making its symbol visible to `dlsym(RTLD_DEFAULT, ...)` even when originally loaded through Android `System.loadLibrary`. The APK build verifies both the exported symbol and global ELF flag before packaging. This is intentionally independent from RenderDoc core and only applies to `:replay`.
+
+## v0.3.3 — GPU replay works, RGBA8 texture preview
+
+The Moto G100 replay smoke test **successfully opened** an app-generated Vulkan
+RDC. The on-device video confirmed 5 event actions (queue submit, clear image,
+copy image to buffer) and one `R8G8B8A8_UNORM` 128×128 texture. The
+earlier crash is no longer reproduced by this small test.
+
+The remaining failure was isolated to the **texture preview**: the first
+implementation always attempted to sample the image through RenderDoc's
+`IReplayOutput::DrawThumbnail`, but the demo's RGBA8 image is a transfer
+resource rather than a guaranteed sampleable texture.
+
+For uncompressed 8-bit RGBA/BGRA normalised textures (up to 32 MiB mip0),
+the app now uses RenderDoc's **real replay-controller `GetTextureData`**,
+checks the exact byte count, converts BGRA to RGBA when necessary, and performs
+a bounded nearest-neighbour downsample on CPU. This avoids drawing the
+transfer-only resource through an unsupported sampled-image path. Complex
+formats (compressed, float, depth, multisample, large) still use RenderDoc's
+GPU thumbnail path when available. If neither path works, the UI now reports
+the native result size/failure stage instead of the generic
+"Texture could not be rendered".
+
+Validation required: open the small app-generated RDC; **Replay Vulkan
+frame** should show 5 events / 1 texture. Open **Textures → Texture 0** and
+confirm that the *image pixels*, not just the RDC metadata screenshot, are
+displayed correctly. Only then investigate a Strato game capture. No merge.

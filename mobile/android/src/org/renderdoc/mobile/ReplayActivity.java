@@ -58,6 +58,7 @@ public final class ReplayActivity extends Activity {
     private static native String[] nativeTextures(int start, int size);
     private static native String nativeSeek(int eventId);
     private static native byte[] nativeTexturePreview(int textureIndex, int maxSide);
+    private static native String nativeLastPreviewError();
     private static native void nativeClose();
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -401,8 +402,12 @@ public final class ReplayActivity extends Activity {
     private void previewTexture(final int index) {
         try {
             final byte[] rgba = nativeTexturePreview(index, 384);
-            if(rgba == null || rgba.length < 8)
-                throw new IOException("Texture could not be rendered by the replay driver.");
+            if(rgba == null || rgba.length < 8) {
+                String problem = nativeLastPreviewError();
+                throw new IOException((problem == null || problem.isEmpty())
+                        ? "Texture could not be read by the replay driver."
+                        : problem);
+            }
             ByteBuffer header = ByteBuffer.wrap(rgba).order(ByteOrder.LITTLE_ENDIAN);
             final int width = header.getInt();
             final int height = header.getInt();
