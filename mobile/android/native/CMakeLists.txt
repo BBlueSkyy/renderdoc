@@ -30,6 +30,7 @@ set_target_properties(renderdoc_mobile_jni PROPERTIES
 
 # Real Vulkan replay bridge in a dedicated Android process.
 add_library(renderdoc_replay_jni SHARED renderdoc_replay_jni.cpp)
+target_compile_definitions(renderdoc_replay_jni PRIVATE RENDERDOC_PLATFORM_ANDROID)
 target_include_directories(renderdoc_replay_jni PRIVATE
     "${RENDERDOC_SOURCE_ROOT}/renderdoc/api"
     "${RENDERDOC_SOURCE_ROOT}/renderdoc/api/replay")

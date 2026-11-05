@@ -1,50 +1,28 @@
-# RenderDoc Mobile: Android ARM64 capture inspector (experimental)
+# RenderDoc Mobile — Android ARM64 inspector and Vulkan replay
 
-This is a **separate Android Activity** that uses RenderDoc's existing native
-capture-file API. It is not a port of the desktop Qt interface, and it cannot
-capture or replay Vulkan frames yet.
+Version 0.3.0 adds an **experimental real Vulkan GPU replay** path to the standalone RenderDoc Mobile app. The existing metadata reader and app-local Vulkan capture test are retained.
 
-## Current scope
+## Open and replay a capture
 
-- Open an RDC capture from the Android Storage Access Framework (no broad
-  storage permission or external-server dependency).
-- Import the file into app-specific storage and read it through
-  `RENDERDOC_OpenCaptureFile` / `ICaptureFile::OpenFile`.
-- Display the original graphics API, recorded machine identifier, section
-  names and sizes, local replay support hint, and embedded thumbnail if present.
-- Perform file import and native inspection off the Android UI thread.
+1. Choose **Open .rdc capture** and import a previously exported RenderDoc `.rdc` file, such as the frame captured by Strato. If you received a ZIP, extract the `.rdc` before importing it.
+2. After native metadata inspection succeeds, tap **Replay Vulkan frame**.
+3. The new replay interface runs in the separate Android process `:replay`. It uses the real RenderDoc `ICaptureFile::OpenCapture()` interface, not the capture's embedded JPEG thumbnail. A successful metadata read alone is never presented as replay success.
+4. Use **Draw calls / events** to browse RenderDoc's action hierarchy and select an event to call `IReplayController::SetFrameEvent()`.
+5. Use **Textures** to select a GPU texture and inspect a bounded RGB(A) preview obtained with `IReplayOutput::DrawThumbnail()` at the current replay event.
+6. Return to the inspector to view another capture. The replay controller is shut down when its isolated Activity closes.
 
-Metadata inspection is not a proof that full Vulkan replay will succeed.
+## Technical details
+
+The native JNI bridge is in `mobile/android/native/renderdoc_replay_jni.cpp`. It opens an RDC through RenderDoc's own ARM64 core, initialises the Vulkan replay controller, flattens/paginates native actions for the Android UI, allows real GPU event replay, and renders small texture previews. GPU calls are performed on a single executor thread to preserve RenderDoc replay thread affinity.
+
+The Android `:replay` process isolates GPU replay state and memory consumption from the metadata inspector and local capture demo. It does not eliminate risk of driver crashes, device-lost failures, or out-of-memory conditions.
+
+On-device validation remains required for Motorola Moto G100 (Android 12, Adreno 650), especially for large Strato game captures. A green Android build validates the native implementation compiles, **not** that the Vulkan driver successfully replays a particular capture. Error messages from the native RenderDoc result are displayed when replay fails.
+
+This is not desktop Qt parity: pixel history, full shader debugger, mesh viewer, descriptor drilldown, arbitrary mips and slices, GPU counters, and custom shaders are not yet implemented.
 
 ## Build
 
-Build the upstream RenderDoc Android `arm64-v8a` core first. Then run:
+Compile the upstream Android ARM64 RenderDoc core, then run `bash mobile/android/build-apk.sh`. The GitHub workflow `RenderDoc Mobile - Android ARM64 core` performs this and uploads `renderdoc-mobile-arm64-debug`. Version 0.3.0 bundles a separate `librenderdoc_replay_jni.so` as well as the existing inspector and capture test.
 
-```bash
-bash mobile/android/build-apk.sh
-```
-
-This script expects `ANDROID_HOME`, `ANDROID_NDK_HOME` (or `ANDROID_NDK`),
-Java 8, Android SDK platform 23, Android build-tools 26.0.1, and the compiled
-`build-android-arm64` directory. GitHub Actions prepares these dependencies.
-
-The APK is published as `renderdoc-mobile-arm64-debug` in the experimental
-workflow. It is debug-signed and is not intended for distribution as a stable
-product.
-
-## Planned next steps
-
-1. Verify installation and opening real Vulkan RDC files on Android 12.
-2. Add precise error reporting, memory and storage-pressure handling.
-3. Prototype local Vulkan replay in a separate, opt-in code path.
-4. Add action browsing and resource/texture viewers only after actual replay
-   works on device.
-
-RenderDoc is licensed under MIT; see the root `LICENSE.md`.
-
-
-## Offscreen Vulkan test (experimental v0.2.0)
-
-Choose **Generate Vulkan test .rdc** to run a real Vulkan image clear and GPU readback in a separate Android process. The test uses RenderDoc's in-application API to start/end capture. It only reports success if RenderDoc registers a nonempty .rdc file under app-specific storage; it does not fabricate one. The result can be opened in the existing native capture inspector or exported with Android's document picker.
-
-Known limitations: whether the Android Vulkan loader enumerates the APK-bundled capture layer varies with Android version and debug settings. On unsupported setups the test will show a diagnostic instead of claiming that capture works. This is an offscreen clear/copy test, **not** Strato capture, Vulkan replay or draw call analysis. Validate on-device before treating it as working.
+The app uses Android's document picker for capture import and needs no ADB, root, network, or broad storage access. The RenderDoc code is licensed under MIT; see the root LICENSE.md.
