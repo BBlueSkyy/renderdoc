@@ -71,3 +71,28 @@ Validation required: open the small app-generated RDC; **Replay Vulkan
 frame** should show 5 events / 1 texture. Open **Textures → Texture 0** and
 confirm that the *image pixels*, not just the RDC metadata screenshot, are
 displayed correctly. Only then investigate a Strato game capture. No merge.
+
+## v0.4.0 — Automatic AI diagnostics ZIP (no manual event navigation)
+
+1. Import a Strato .rdc and confirm that the capture inspector opens.
+2. Tap **Export AI diagnostics (.zip)**; the isolated replay subprocess creates a bounded report.
+3. Choose Downloads in the Android Save dialog.
+4. Share the diagnostic ZIP, the original .rdc, Strato emulation.log and an image/video of the defect with the AI.
+
+Report files: manifest.json (counts and limits); events.jsonl (event IDs/actions);
+resources.jsonl (resource creation chunks, names and parent/derived IDs);
+textures.jsonl and buffers.jsonl (dimensions/formats/memory);
+resource-usage.jsonl (representative per-resource usage history);
+pipeline-samples.jsonl (up to 16 replay events with Vulkan pipeline and shader state);
+shader-disassembly.jsonl (up to four shader disassemblies, if supported);
+debug-messages.jsonl and replay-steps.txt (driver/replay diagnostics).
+
+IMPORTANT: the original RDC is not embedded, and the ZIP is not a substitute
+for a full Replay capture. Resources and pipelines are sampled under strict
+memory/time caps. Vulkan ResourceIds are local to this capture and do not
+automatically resolve to Nintendo Switch TIC, IOVA or Strato authority regions.
+No game/driver root cause is inferred automatically. The app performs
+everything offline; you explicitly save/share the ZIP. The files may contain
+game shaders, debug names and addresses, so review before sharing.
+If the GPU driver cannot replay a heavy capture, export the existing replay
+crash ZIP and share the original .rdc instead. The Strato PR #422 is untouched.
