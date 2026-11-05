@@ -8,6 +8,10 @@
  */
 #include <jni.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <cerrno>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -35,6 +39,29 @@ IReplayController *controller = nullptr;
 IReplayOutput *output = nullptr;
 std::vector<ActionRow> actions;
 uint32_t currentEvent = 0;
+std::string diagnosticPath;
+
+// An append-only checkpoint survives SIGSEGV/SIGABRT in the :replay process.
+// Each entry is committed before potentially crashing native driver calls.
+void checkpoint(const char *stage)
+{
+  if(diagnosticPath.empty()) return;
+  int fd = open(diagnosticPath.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+  if(fd < 0) return;
+  const std::string message = std::to_string((long)getpid()) + "  " + stage + "\n";
+  const char *ptr = message.c_str();
+  size_t left = message.size();
+  while(left)
+  {
+    ssize_t count = write(fd, ptr, left);
+    if(count > 0) { left -= (size_t)count; ptr += count; }
+    else if(count < 0 && errno == EINTR) continue;
+    else break;
+  }
+  fsync(fd);
+  close(fd);
+}
+
 
 std::string utf8(JNIEnv *env, jstring str)
 {
@@ -124,15 +151,19 @@ void flatten(const rdcarray<ActionDescription> &children, uint32_t depth, const 
 } // namespace
 
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring pathValue)
+Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring pathValue,
+                                                     jstring diagnosticFile)
 {
   std::lock_guard<std::mutex> lock(replayMutex);
   closeCapture();
+  diagnosticPath = utf8(env, diagnosticFile);
+  checkpoint("nativeOpen: entered");
 
   const std::string path = utf8(env, pathValue);
   if(path.empty())
     return error(env, "No capture selected");
 
+  checkpoint("RenderDoc: dlopen begin");
   if(!renderdocLibrary)
     renderdocLibrary = dlopen("libVkLayer_GLES_RenderDoc.so", RTLD_NOW | RTLD_LOCAL);
   if(!renderdocLibrary)
@@ -142,6 +173,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring
                            (message ? message : "unknown error"));
   }
 
+  checkpoint("RenderDoc: dlopen succeeded");
   auto open = reinterpret_cast<OpenCaptureFileFn>(
       dlsym(renderdocLibrary, "RENDERDOC_OpenCaptureFile"));
   auto initialise = reinterpret_cast<InitialiseReplayFn>(
@@ -152,16 +184,24 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring
   if(!replayInitialised)
   {
     GlobalEnvironment globals{};
-    globals.enumerateGPUs = true;
+    // Enumerating the GPU twice during bootstrap is unnecessary. OpenCapture
+    // selects the Vulkan device on its own. Keep initialisation minimal.
+    globals.enumerateGPUs = false;
+    checkpoint("InitialiseReplay: entering");
     initialise(globals, {});
     replayInitialised = true;
+    checkpoint("InitialiseReplay: succeeded");
   }
 
+  checkpoint("OpenCaptureFile: entering");
   openFile = open();
+  checkpoint("OpenCaptureFile: returned");
   if(!openFile)
     return error(env, "RenderDoc failed to create a capture reader");
 
+  checkpoint("OpenFile metadata: entering");
   ResultDetails metadata = openFile->OpenFile(path.c_str(), "rdc");
+  checkpoint("OpenFile metadata: returned");
   if(!metadata.OK())
   {
     const std::string message = replayErrorText(metadata);
@@ -171,13 +211,16 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring
 
   // A hint of replay support is not a successful GPU replay.
   // OpenCapture actually creates/replays Vulkan state, and returns specific errors.
+  checkpoint("OpenCapture GPU: entering");
   const auto result = openFile->OpenCapture(ReplayOptions{});
+  checkpoint("OpenCapture GPU: returned");
   if(!result.first.OK() || !result.second)
   {
     const std::string message = replayErrorText(result.first);
     if(result.second)
       result.second->Shutdown();
     closeCapture();
+    checkpoint("OpenCapture GPU: failed with RenderDoc result");
     return error(env, "GPU replay failed: " + message);
   }
 
@@ -186,20 +229,20 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring
   openFile->Shutdown();
   openFile = nullptr;
 
-  WindowingData window{};
-  window.system = WindowingSystem::Unknown;
-  output = controller->CreateOutput(window, ReplayOutputType::Headless);
-
+  // Do not create replay outputs or issue an extra SetFrameEvent during the
+  // initial open: some Android Vulkan drivers reject headless output setup.
+  // The controller's initial event is enough to browse. Create an output
+  // lazily on the user's first texture-preview request.
+  checkpoint("GetStructuredFile: entering");
   const SDFile &structured = controller->GetStructuredFile();
+  checkpoint("GetRootActions: entering");
   flatten(controller->GetRootActions(), 0, structured);
-
+  checkpoint("GetRootActions: flattened");
   if(!actions.empty())
-  {
     currentEvent = actions.back().eventId;
-    controller->SetFrameEvent(currentEvent, false);
-  }
 
   const APIProperties props = controller->GetAPIProperties();
+  checkpoint("nativeOpen: success");
   return array(env, {"ok",
                      std::string("Replay initialised on device") +
                          (props.degraded ? " (degraded graphics support)" : ""),
@@ -263,7 +306,9 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeSeek(JNIEnv *env, jclass, jint re
   if(it == actions.end())
     return env->NewStringUTF("Event not found in this capture");
 
+  checkpoint("SetFrameEvent: entering");
   controller->SetFrameEvent((uint32_t)requested, false);
+  checkpoint("SetFrameEvent: returned");
   currentEvent = (uint32_t)requested;
   const auto &descriptorAccess = controller->GetDescriptorAccess();
   std::string response = "Event " + std::to_string(requested) + " replayed: " + it->name +
@@ -291,8 +336,17 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeTexturePreview(JNIEnv *env, jclas
                                                                jint index, jint maxSide)
 {
   std::lock_guard<std::mutex> lock(replayMutex);
-  if(!controller || !output || index < 0 || maxSide < 1)
+  if(!controller || index < 0 || maxSide < 1)
     return nullptr;
+  if(!output)
+  {
+    checkpoint("CreateOutput Headless: entering");
+    WindowingData window{};
+    window.system = WindowingSystem::Unknown;
+    output = controller->CreateOutput(window, ReplayOutputType::Headless);
+    checkpoint("CreateOutput Headless: returned");
+    if(!output) return nullptr;
+  }
 
   const auto &textures = controller->GetTextures();
   if((size_t)index >= textures.size())
@@ -309,8 +363,10 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeTexturePreview(JNIEnv *env, jclas
 
   // DrawThumbnail renders the *selected event's GPU texture contents* via
   // RenderDoc's replay output; it is not the embedded RDC screenshot.
+  checkpoint("DrawThumbnail: entering");
   const bytebuf rgba = output->DrawThumbnail(width, height, tex.resourceId,
                                               Subresource(0, 0, 0), CompType::Typeless);
+  checkpoint("DrawThumbnail: returned");
   const size_t expected = (size_t)width * (size_t)height * 4;
   if(rgba.size() != expected || expected > 512 * 512 * 4)
     return nullptr;
