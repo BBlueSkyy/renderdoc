@@ -50,6 +50,7 @@ public final class MainActivity extends Activity {
     private ImageView thumbnail;
     private Button openButton;
     private Button replayButton;
+    private Button aiExportButton;
     private Button diagnosticsButton;
     private TextView diagnosticsSummary;
     private File currentReplayCapture;
@@ -132,6 +133,25 @@ public final class MainActivity extends Activity {
             }
         });
 
+        aiExportButton = new Button(this);
+        aiExportButton.setAllCaps(false);
+        aiExportButton.setText("Export AI diagnostics (.zip)");
+        aiExportButton.setTextColor(Color.WHITE);
+        aiExportButton.setEnabled(false);
+        LinearLayout.LayoutParams aiParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
+        aiParams.topMargin = dp(10);
+        page.addView(aiExportButton, aiParams);
+        aiExportButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if(currentReplayCapture != null && currentReplayCapture.isFile()) {
+                    Intent export = new Intent(MainActivity.this, ReplayActivity.class);
+                    export.putExtra("capture_path", currentReplayCapture.getAbsolutePath());
+                    export.putExtra("ai_export", true);
+                    startActivity(export);
+                }
+            }
+        });
         diagnosticsSummary = label("", 12, MUTED, false);
         diagnosticsSummary.setVisibility(View.GONE);
         page.addView(diagnosticsSummary);
@@ -270,6 +290,7 @@ public final class MainActivity extends Activity {
         final String name = getDocumentName(uri);
         currentReplayCapture = null;
         replayButton.setEnabled(false);
+        aiExportButton.setEnabled(false);
         status.setText("Importing capture…");
         details.setText(name);
         thumbnail.setVisibility(View.GONE);
@@ -351,6 +372,7 @@ public final class MainActivity extends Activity {
                     }
                     currentReplayCapture = file;
                     replayButton.setEnabled(true);
+                    aiExportButton.setEnabled(true);
                     status.setText("Capture opened successfully");
                     String information = "File: " + name +
                             "\nSize: " + formatBytes(file.length()) +
@@ -410,6 +432,7 @@ public final class MainActivity extends Activity {
         }
         currentReplayCapture = null;
         replayButton.setEnabled(false);
+        aiExportButton.setEnabled(false);
         status.setText("Reading generated .rdc…");
         details.setText(file.getName());
         thumbnail.setVisibility(View.GONE);
@@ -431,6 +454,7 @@ public final class MainActivity extends Activity {
                             }
                             currentReplayCapture = file;
                             replayButton.setEnabled(true);
+                            aiExportButton.setEnabled(true);
                             status.setText("Generated .rdc opened successfully");
                             details.setText("File: " + file.getName() +
                                     "\nSize: " + formatBytes(file.length()) +
