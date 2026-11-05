@@ -48,7 +48,7 @@ public final class ReplayActivity extends Activity {
         LOAD_ERROR = failure;
     }
 
-    private static native String[] nativeOpen(String capturePath);
+    private static native String[] nativeOpen(String capturePath, String diagnosticsPath);
     private static native String[] nativeActions(int start, int size);
     private static native String[] nativeTextures(int start, int size);
     private static native String nativeSeek(int eventId);
@@ -165,10 +165,27 @@ public final class ReplayActivity extends Activity {
             return;
         }
 
+        ReplayDiagnostics.begin(this, file);
+        // Keep the native subprocess disposable, but retain Java exception
+        // details if the failure is in UI/JNI glue rather than the GPU driver.
+        final Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            @Override public void uncaughtException(Thread thread, Throwable problem) {
+                java.io.StringWriter text = new java.io.StringWriter();
+                problem.printStackTrace(new java.io.PrintWriter(text));
+                ReplayDiagnostics.append(ReplayActivity.this, "Uncaught Java exception: " + text.toString());
+                if(previous != null) previous.uncaughtException(thread, problem);
+            }
+        });
         worker.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    final String[] result = nativeOpen(file.getAbsolutePath());
+                    final String[] result = nativeOpen(
+                            file.getAbsolutePath(), ReplayDiagnostics.traceFile(ReplayActivity.this).getAbsolutePath());
+                    ReplayDiagnostics.append(ReplayActivity.this, result != null &&
+                            result.length > 0 && "ok".equals(result[0])
+                            ? "nativeOpen returned successfully"
+                            : "nativeOpen returned an error");
                     post(new Runnable() {
                         @Override public void run() {
                             if(result == null || result.length < 4 || !"ok".equals(result[0])) {
@@ -190,6 +207,8 @@ public final class ReplayActivity extends Activity {
                         }
                     });
                 } catch(final Throwable failure) {
+                    ReplayDiagnostics.append(ReplayActivity.this,
+                            "Replay worker exception: " + failure.toString());
                     post(new Runnable() {
                         @Override public void run() {
                             status.setText("Replay error");
@@ -408,7 +427,13 @@ public final class ReplayActivity extends Activity {
     @Override protected void onDestroy() {
         destroyed = true;
         worker.execute(new Runnable() {
-            @Override public void run() { if(LOAD_ERROR == null) nativeClose(); }
+            @Override public void run() {
+                if(LOAD_ERROR == null) {
+                    ReplayDiagnostics.append(ReplayActivity.this, "nativeClose entering");
+                    nativeClose();
+                    ReplayDiagnostics.append(ReplayActivity.this, "nativeClose completed");
+                }
+            }
         });
         worker.shutdown();
         super.onDestroy();

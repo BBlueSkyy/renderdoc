@@ -41,6 +41,7 @@ javac -source 7 -target 7 \
   "$APP/src/org/renderdoc/mobile/MainActivity.java" \
   "$APP/src/org/renderdoc/mobile/DemoCaptureActivity.java" \
   "$APP/src/org/renderdoc/mobile/ReplayActivity.java" \
+  "$APP/src/org/renderdoc/mobile/ReplayDiagnostics.java" \
   "$STAGE/gen/org/renderdoc/mobile/R.java"
 
 "$TOOLS/dx" --dex --output="$STAGE/bin/classes.dex" "$STAGE/obj"
@@ -53,7 +54,7 @@ cp "$BUILD/native/lib/librenderdoc_vulkan_demo.so" "$STAGE/libs/lib/arm64-v8a/"
 (
   cd "$STAGE"
   "$TOOLS/aapt" package -f -M "$APP/AndroidManifest.xml" -S "$APP/res" \
-    -I "$JAR" --version-code 3 --version-name "0.3.0" \
+    -I "$JAR" --version-code 4 --version-name "0.3.1" \
     -F unsigned.apk bin libs
   "$TOOLS/zipalign" -f 4 unsigned.apk aligned.apk
 

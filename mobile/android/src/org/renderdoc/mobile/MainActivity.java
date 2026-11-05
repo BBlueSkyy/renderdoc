@@ -31,12 +31,14 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_CAPTURE = 1001;
+    private static final int REQUEST_REPLAY_DIAGNOSTICS = 1002;
     private static final int BACKGROUND = Color.rgb(21, 24, 29);
     private static final int PANEL = Color.rgb(34, 39, 47);
     private static final int MUTED = Color.rgb(170, 179, 194);
@@ -48,6 +50,8 @@ public final class MainActivity extends Activity {
     private ImageView thumbnail;
     private Button openButton;
     private Button replayButton;
+    private Button diagnosticsButton;
+    private TextView diagnosticsSummary;
     private File currentReplayCapture;
     private volatile boolean closing;
 
@@ -128,6 +132,26 @@ public final class MainActivity extends Activity {
             }
         });
 
+        diagnosticsSummary = label("", 12, MUTED, false);
+        diagnosticsSummary.setVisibility(View.GONE);
+        page.addView(diagnosticsSummary);
+        diagnosticsButton = new Button(this);
+        diagnosticsButton.setText("Export replay diagnostics (.zip)");
+        diagnosticsButton.setAllCaps(false);
+        diagnosticsButton.setTextColor(Color.WHITE);
+        diagnosticsButton.setVisibility(View.GONE);
+        page.addView(diagnosticsButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(49)));
+        diagnosticsButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                save.setType("application/zip");
+                save.addCategory(Intent.CATEGORY_OPENABLE);
+                save.putExtra(Intent.EXTRA_TITLE, "renderdoc-replay-diagnostics.zip");
+                startActivityForResult(save, REQUEST_REPLAY_DIAGNOSTICS);
+            }
+        });
+
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(16), dp(16), dp(18));
@@ -172,6 +196,20 @@ public final class MainActivity extends Activity {
         }
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        if(diagnosticsSummary == null || diagnosticsButton == null) return;
+        final File last = ReplayDiagnostics.traceFile(this);
+        if(!last.isFile()) return;
+        String stage = ReplayDiagnostics.lastCheckpoint(this);
+        String exitReason = ReplayDiagnostics.lastExit(this);
+        diagnosticsSummary.setText("Last replay checkpoint: " + stage +
+                "\n" + exitReason + "\n" +
+                "Export the diagnostic ZIP if the replay closed unexpectedly.");
+        diagnosticsSummary.setVisibility(View.VISIBLE);
+        diagnosticsButton.setVisibility(View.VISIBLE);
+    }
+
     private int dp(int value) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
                 value, getResources().getDisplayMetrics());
@@ -198,6 +236,33 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REQUEST_REPLAY_DIAGNOSTICS) {
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            final Uri destination = data.getData();
+            executor.execute(new Runnable() {
+                @Override public void run() {
+                    try {
+                        OutputStream stream = getContentResolver().openOutputStream(destination);
+                        if (stream == null) throw new IOException("Cannot write selected document");
+                        ReplayDiagnostics.export(MainActivity.this, stream);
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if(!closing) diagnosticsSummary.setText(
+                                        "Replay diagnostics exported. You can share the ZIP for analysis.");
+                            }
+                        });
+                    } catch (final Throwable failure) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if(!closing) diagnosticsSummary.setText(
+                                        "Failed to export replay diagnostics: " + failure.toString());
+                            }
+                        });
+                    }
+                }
+            });
+            return;
+        }
         if (request != REQUEST_CAPTURE || result != RESULT_OK || data == null
                 || data.getData() == null) return;
 
