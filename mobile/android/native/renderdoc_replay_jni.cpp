@@ -603,8 +603,9 @@ std::string aiSaveImage(const std::string &folder, const std::string &basename,
   TextureSave params{};
   params.resourceId = tex.resourceId;
   params.destType = type;
-  params.mip = 0;
-  params.slice.sliceIndex = 0;
+  // DDS can preserve the full compressed mip chain, unlike the PNG/EXR preview.
+  params.mip = type == FileType::DDS ? -1 : 0;
+  params.slice.sliceIndex = type == FileType::DDS ? -1 : 0;
   params.comp.blackPoint = 0.0f;
   params.comp.whitePoint = aiHDRTexture(tex) && type == FileType::PNG ? 8.0f : 1.0f;
   const std::string fullpath = folder + "/" + filename;
