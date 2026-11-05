@@ -256,6 +256,21 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeSeek(JNIEnv *env, jclass, jint re
   const auto &descriptorAccess = controller->GetDescriptorAccess();
   std::string response = "Event " + std::to_string(requested) + " replayed: " + it->name +
                          "\nDescriptor accesses: " + std::to_string(descriptorAccess.size());
+  // The Vulkan state is taken after actually seeking the replay to this event.
+  // This is pipeline/descriptor metadata from RenderDoc, not guessed from RDC bytes.
+  const VKPipe::State *vk = controller->GetVulkanPipelineState();
+  if(vk)
+  {
+    response += "\nGraphics descriptor sets: " + std::to_string(vk->graphics.descriptorSets.size());
+    response += "\nCompute descriptor sets: " + std::to_string(vk->compute.descriptorSets.size());
+    response += "\nPush constant bytes: " + std::to_string(vk->pushconsts.size());
+    if(!vk->vertexShader.entryPoint.empty())
+      response += "\nVertex shader: " + std::string(vk->vertexShader.entryPoint.c_str());
+    if(!vk->fragmentShader.entryPoint.empty())
+      response += "\nFragment shader: " + std::string(vk->fragmentShader.entryPoint.c_str());
+    if(!vk->computeShader.entryPoint.empty())
+      response += "\nCompute shader: " + std::string(vk->computeShader.entryPoint.c_str());
+  }
   return env->NewStringUTF(response.c_str());
 }
 
