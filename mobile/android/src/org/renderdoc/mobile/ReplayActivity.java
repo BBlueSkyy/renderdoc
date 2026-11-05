@@ -29,6 +29,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import java.nio.ByteBuffer;
@@ -46,7 +49,9 @@ public final class ReplayActivity extends Activity {
     private static final String[] AI_FILES = {
         "README.txt", "manifest.json", "events.jsonl", "resources.jsonl",
         "textures.jsonl", "buffers.jsonl", "resource-usage.jsonl",
-        "pipeline-samples.jsonl", "shader-disassembly.jsonl", "debug-messages.jsonl"
+        "pipeline-samples.jsonl", "shader-disassembly.jsonl", "debug-messages.jsonl",
+        "descriptor-details.jsonl", "hdr-snapshots.jsonl", "material-textures.jsonl",
+        "shader-artifacts.jsonl"
     };
 
     private static final String LOAD_ERROR;
@@ -337,6 +342,50 @@ public final class ReplayActivity extends Activity {
                                     zip.write(buffer, 0, count);
                                 }
                             }
+                            zip.closeEntry();
+                        }
+                        // Include only native-generated assets, not arbitrary user files.
+                        // The entire report is capped so a 700 MiB game capture does
+                        // not force a similarly huge upload from the user's phone.
+                        File[] assets = folder.listFiles();
+                        ArrayList<String> skipped = new ArrayList<String>();
+                        if(assets != null) {
+                            Arrays.sort(assets, new Comparator<File>() {
+                                @Override public int compare(File a, File b) {
+                                    return a.getName().compareTo(b.getName());
+                                }
+                            });
+                            int included = 0;
+                            for(File asset : assets) {
+                                String name = asset.getName();
+                                if(!asset.isFile() || !name.matches(
+                                        "^(snapshot_|material_|fragment_)[A-Za-z0-9_]+\\.(png|exr|dds|spv|shaderbin)$"))
+                                    continue;
+                                if(included >= 70 || asset.length() <= 0 ||
+                                        asset.length() > 32L * 1024L * 1024L ||
+                                        total + asset.length() > 192L * 1024L * 1024L) {
+                                    skipped.add(name + ": size/file-count budget");
+                                    continue;
+                                }
+                                zip.putNextEntry(new ZipEntry(name));
+                                try(InputStream input = new FileInputStream(asset)) {
+                                    int count;
+                                    while((count = input.read(buffer)) != -1) {
+                                        total += count;
+                                        zip.write(buffer, 0, count);
+                                    }
+                                }
+                                zip.closeEntry();
+                                included++;
+                            }
+                        }
+                        if(!skipped.isEmpty()) {
+                            zip.putNextEntry(new ZipEntry("assets-omitted.txt"));
+                            StringBuilder warning = new StringBuilder(
+                                    "Some binary image/shader assets were omitted to limit the ZIP size:\n");
+                            for(String item : skipped) warning.append(item).append('\n');
+                            byte[] omission = warning.toString().getBytes("UTF-8");
+                            zip.write(omission, 0, omission.length);
                             zip.closeEntry();
                         }
                         File trace = ReplayDiagnostics.traceFile(ReplayActivity.this);
