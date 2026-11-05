@@ -26,3 +26,15 @@ This is not desktop Qt parity: pixel history, full shader debugger, mesh viewer,
 Compile the upstream Android ARM64 RenderDoc core, then run `bash mobile/android/build-apk.sh`. The GitHub workflow `RenderDoc Mobile - Android ARM64 core` performs this and uploads `renderdoc-mobile-arm64-debug`. Version 0.3.0 bundles a separate `librenderdoc_replay_jni.so` as well as the existing inspector and capture test.
 
 The app uses Android's document picker for capture import and needs no ADB, root, network, or broad storage access. The RenderDoc code is licensed under MIT; see the root LICENSE.md.
+
+## v0.3.1: crash investigation on Android 12 (no ADB)
+
+If the `Vulkan frame replay` screen disappears as soon as `Opening capture on the GPU...` appears:
+
+- **Do not infer the cause from the video alone**. The isolated `:replay` process may have crashed natively, thrown a Java exception, or been killed under memory pressure.
+- Version 0.3.1 defers headless replay-output setup and initial event replays until the user requests them. This removes extra GPU work during capture open but does not prove all driver crashes are fixed.
+- Native JNI writes durable breadcrumbs before/after `RENDERDOC_InitialiseReplay`, file open, `ICaptureFile::OpenCapture`, event parsing and texture preview.
+- The main activity reads these breadcrumbs and Android 12's `ApplicationExitInfo` for the `:replay` subprocess. It provides **Export replay diagnostics (.zip)** with `replay-steps.txt`, `android-exit-reason.txt`, and an Android 12 native tombstone protobuf when available.
+- There is no requirement to install ADB, Shizuku or root. Tombstones may be evicted by Android before export; in that case the stage and exit reason remain valuable.
+
+**Reproduction protocol:** use the tiny app-generated RDC first, tap replay once, then (if the subprocess closes) export and share the diagnostic ZIP from the main inspector. Diagnose the first native failure using these records before implementing additional speculative GPU fixes. Only move to the larger SpongeBob RDC after the small capture opens successfully.
