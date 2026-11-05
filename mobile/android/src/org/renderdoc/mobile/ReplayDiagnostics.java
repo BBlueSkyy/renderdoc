@@ -28,7 +28,6 @@ import java.util.zip.ZipOutputStream;
 
 public final class ReplayDiagnostics {
     private static final String TRACE = "replay-steps.txt";
-    private static final String PREF = "replay_diagnostics";
 
     private ReplayDiagnostics() { }
 
@@ -38,8 +37,6 @@ public final class ReplayDiagnostics {
 
     public static synchronized void begin(Context context, File capture) {
         long now = System.currentTimeMillis();
-        context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-                .edit().putLong("start", now).commit();
         final File file = traceFile(context);
         try (FileOutputStream out = new FileOutputStream(file, false)) {
             String title = "RenderDoc Mobile Vulkan replay diagnostics\n" +
@@ -76,11 +73,27 @@ public final class ReplayDiagnostics {
         return "";
     }
 
+    // Read from app-private storage rather than SharedPreferences: the main
+    // Activity and replay Activity run in different processes, and Android
+    // does not guarantee cross-process SharedPreferences cache consistency.
+    private static long lastStart(Context context) {
+        try (FileInputStream in = new FileInputStream(traceFile(context))) {
+            byte[] bytes = new byte[512];
+            int count = in.read(bytes);
+            if (count <= 0) return 0L;
+            String[] lines = new String(bytes, 0, count, StandardCharsets.UTF_8).split("\n");
+            for (String line : lines) {
+                if (line.startsWith("Started: "))
+                    return Long.parseLong(line.substring(9).trim());
+            }
+        } catch (Exception ignored) { }
+        return 0L;
+    }
+
     // Returns the most recent matching subprocess exit from this attempt, or null.
     private static Object replayExit(Context context) {
         if (Build.VERSION.SDK_INT < 30) return null;
-        long since = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-                .getLong("start", 0L);
+        long since = lastStart(context);
         if (since <= 0L) return null;
         try {
             ActivityManager manager =
