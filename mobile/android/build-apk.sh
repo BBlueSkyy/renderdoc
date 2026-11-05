@@ -25,6 +25,7 @@ cmake -S "$APP/native" -B "$BUILD/native" \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-23 \
   -DANDROID_STL=c++_static \
   "-DRENDERDOC_SOURCE_ROOT=$ROOT" \
+  "-DRENDERDOC_CORE_LIBRARY=$CORE/lib/libVkLayer_GLES_RenderDoc.so" \
   -DCMAKE_BUILD_TYPE=Debug
 cmake --build "$BUILD/native" --parallel 2
 
