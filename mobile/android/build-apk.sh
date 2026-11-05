@@ -40,18 +40,20 @@ javac -source 7 -target 7 \
   -classpath "$JAR" -d "$STAGE/obj" \
   "$APP/src/org/renderdoc/mobile/MainActivity.java" \
   "$APP/src/org/renderdoc/mobile/DemoCaptureActivity.java" \
+  "$APP/src/org/renderdoc/mobile/ReplayActivity.java" \
   "$STAGE/gen/org/renderdoc/mobile/R.java"
 
 "$TOOLS/dx" --dex --output="$STAGE/bin/classes.dex" "$STAGE/obj"
 
 cp "$CORE/lib/libVkLayer_GLES_RenderDoc.so" "$STAGE/libs/lib/arm64-v8a/"
 cp "$BUILD/native/lib/librenderdoc_mobile_jni.so" "$STAGE/libs/lib/arm64-v8a/"
+cp "$BUILD/native/lib/librenderdoc_replay_jni.so" "$STAGE/libs/lib/arm64-v8a/"
 cp "$BUILD/native/lib/librenderdoc_vulkan_demo.so" "$STAGE/libs/lib/arm64-v8a/"
 
 (
   cd "$STAGE"
   "$TOOLS/aapt" package -f -M "$APP/AndroidManifest.xml" -S "$APP/res" \
-    -I "$JAR" --version-code 2 --version-name "0.2.0" \
+    -I "$JAR" --version-code 3 --version-name "0.3.0" \
     -F unsigned.apk bin libs
   "$TOOLS/zipalign" -f 4 unsigned.apk aligned.apk
 

@@ -28,6 +28,16 @@ target_link_libraries(renderdoc_mobile_jni PRIVATE renderdoc_core dl log)
 set_target_properties(renderdoc_mobile_jni PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
+# Real Vulkan replay bridge in a dedicated Android process.
+add_library(renderdoc_replay_jni SHARED renderdoc_replay_jni.cpp)
+target_include_directories(renderdoc_replay_jni PRIVATE
+    "${RENDERDOC_SOURCE_ROOT}/renderdoc/api"
+    "${RENDERDOC_SOURCE_ROOT}/renderdoc/api/replay")
+target_compile_features(renderdoc_replay_jni PRIVATE cxx_std_14)
+target_link_libraries(renderdoc_replay_jni PRIVATE renderdoc_core dl log)
+set_target_properties(renderdoc_replay_jni PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
 # Dedicated app-local Vulkan capture test, isolated from the replay reader.
 add_library(renderdoc_vulkan_demo SHARED vk_demo.cpp)
 target_include_directories(renderdoc_vulkan_demo PRIVATE

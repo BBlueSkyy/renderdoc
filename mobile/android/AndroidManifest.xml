@@ -14,6 +14,10 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <activity android:name=".ReplayActivity"
+            android:exported="false"
+            android:process=":replay"
+            android:label="Vulkan Replay"/>
         <activity android:name=".DemoCaptureActivity"
             android:exported="false"
             android:process=":vulkan_demo"

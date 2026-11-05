@@ -47,6 +47,8 @@ public final class MainActivity extends Activity {
     private TextView details;
     private ImageView thumbnail;
     private Button openButton;
+    private Button replayButton;
+    private File currentReplayCapture;
     private volatile boolean closing;
 
     private static final String NATIVE_LOAD_ERROR;
@@ -107,6 +109,25 @@ public final class MainActivity extends Activity {
             }
         });
 
+        replayButton = new Button(this);
+        replayButton.setAllCaps(false);
+        replayButton.setText("Replay Vulkan frame");
+        replayButton.setTextColor(Color.WHITE);
+        replayButton.setEnabled(false);
+        LinearLayout.LayoutParams replayParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
+        replayParams.topMargin = dp(10);
+        page.addView(replayButton, replayParams);
+        replayButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if(currentReplayCapture != null && currentReplayCapture.isFile()) {
+                    Intent replay = new Intent(MainActivity.this, ReplayActivity.class);
+                    replay.putExtra("capture_path", currentReplayCapture.getAbsolutePath());
+                    startActivity(replay);
+                }
+            }
+        });
+
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(16), dp(16), dp(16), dp(18));
@@ -131,7 +152,7 @@ public final class MainActivity extends Activity {
 
         details = label(
                 "This first release reads metadata, capture sections, and an embedded thumbnail " +
-                "using the native RenderDoc API. Frame replay and live capture are not enabled yet.",
+                "using the native RenderDoc API. Real GPU replay is optional and uses a separate process.",
                 14, MUTED, false);
         details.setPadding(0, dp(12), 0, 0);
         panel.addView(details);
@@ -147,6 +168,7 @@ public final class MainActivity extends Activity {
             status.setText("Native library unavailable");
             details.setText(NATIVE_LOAD_ERROR);
             openButton.setEnabled(false);
+            replayButton.setEnabled(false);
         }
     }
 
@@ -181,6 +203,8 @@ public final class MainActivity extends Activity {
 
         final Uri uri = data.getData();
         final String name = getDocumentName(uri);
+        currentReplayCapture = null;
+        replayButton.setEnabled(false);
         status.setText("Importing capture…");
         details.setText(name);
         thumbnail.setVisibility(View.GONE);
@@ -260,6 +284,8 @@ public final class MainActivity extends Activity {
                         details.setText(name + "\n\n" + result[1]);
                         return;
                     }
+                    currentReplayCapture = file;
+                    replayButton.setEnabled(true);
                     status.setText("Capture opened successfully");
                     String information = "File: " + name +
                             "\nSize: " + formatBytes(file.length()) +
@@ -267,7 +293,7 @@ public final class MainActivity extends Activity {
                             "\nRecorded machine: " + result[2] +
                             "\nLocal replay support: " + result[3] +
                             "\n\nCapture sections:\n" + result[4] +
-                            "\n\nReplay has not been tested by this metadata inspection.";
+                            "\n\nTap Replay Vulkan frame to attempt real GPU replay.";
                     details.setText(information);
                     if (result[5] != null && !result[5].isEmpty()) {
                         try {
@@ -317,6 +343,8 @@ public final class MainActivity extends Activity {
             status.setText("Cannot validate generated capture path.");
             return;
         }
+        currentReplayCapture = null;
+        replayButton.setEnabled(false);
         status.setText("Reading generated .rdc…");
         details.setText(file.getName());
         thumbnail.setVisibility(View.GONE);
@@ -336,6 +364,8 @@ public final class MainActivity extends Activity {
                                 details.setText(result[1]);
                                 return;
                             }
+                            currentReplayCapture = file;
+                            replayButton.setEnabled(true);
                             status.setText("Generated .rdc opened successfully");
                             details.setText("File: " + file.getName() +
                                     "\nSize: " + formatBytes(file.length()) +
@@ -343,7 +373,7 @@ public final class MainActivity extends Activity {
                                     "\nRecorded machine: " + result[2] +
                                     "\nReplay support hint: " + result[3] +
                                     "\n\nSections:\n" + result[4] +
-                                    "\n\nFrame replay is not enabled yet.");
+                                    "\n\nTap Replay Vulkan frame to try GPU replay.");
                             if (result[5] != null && !result[5].isEmpty()) {
                                 try {
                                     byte[] bytes = Base64.decode(result[5], Base64.NO_WRAP);
