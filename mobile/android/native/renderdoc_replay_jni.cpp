@@ -1040,7 +1040,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
 
   manifest << "{\n"
            << "\"schema\":1,\"source\":\"RenderDoc native Vulkan replay\","
-           << "\"complete\":true,"
+           << "\"complete\":false,\"bounded\":true,"
            << "\"actions_total\":" << actions.size() << ","
            << "\"actions_exported\":" << std::min(actions.size(), maxActions) << ","
            << "\"resources_total\":" << resources.size() << ","

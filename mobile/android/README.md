@@ -96,3 +96,32 @@ everything offline; you explicitly save/share the ZIP. The files may contain
 game shaders, debug names and addresses, so review before sharing.
 If the GPU driver cannot replay a heavy capture, export the existing replay
 crash ZIP and share the original .rdc instead. The Strato PR #422 is untouched.
+
+## v0.5.0 — HDR, BC material and shader evidence
+
+After opening an RDC, tap **Export AI diagnostics (.zip)**. This experimental report now adds:
+
+- `hdr-snapshots.jsonl`: up to three sampled draw events with HDR color outputs. Each pair
+  attempts PNG and EXR for BEFORE (after the preceding recorded action) and AFTER (after
+  the selected draw). PNG tone-maps float range [0,8] to SDR and is lossy; EXR preserves
+  floating-point data where supported. No HDR outputs may be present or exportable.
+- `material-textures.jsonl`: up to eight BC1/BC5 resources actually referenced through
+  descriptors of selected events. DDS is the intended compressed-block artifact;
+  a PNG preview is attempted separately. Images above 16 MiB are skipped.
+- `shader-artifacts.jsonl`: original fragment shader binaries (SPIR-V if embedded),
+  entrypoints/encoding, and reflection binding set/index/type. Max eight, 4 MiB each.
+- `descriptor-details.jsonl`: accessed descriptors at sampled events, including backing
+  resource/view IDs, offsets, slices, mips, sampler and logical binding when present.
+  Max 128 accesses per sampled event; records are not exhaustive.
+
+Asset files use `snapshot_*.png/.exr`, `material_*.dds/.png`,
+`fragment_*.spv/.shaderbin`. Files absent because of unsupported replay return
+empty names in JSONL. The ZIP enforces size and file-count limits and may include
+`assets-omitted.txt`. Missing data must not be treated as valid/zero data.
+
+Resource IDs are local to the RDC. Send the original RDC and the Strato
+`.rdc.strato-links.jsonl` association file if available. Strato can attach
+TIC/IOVA names to Vulkan images using VK_EXT_debug_utils if the driver
+supports it; raw VkImage handles from separate processes must NOT be joined
+directly. Samples and before/after captures alone do not prove the root cause
+of graphics corruption. Preserve PR Draft, no merge until device tests.
