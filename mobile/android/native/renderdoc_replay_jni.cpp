@@ -40,6 +40,7 @@ IReplayOutput *output = nullptr;
 std::vector<ActionRow> actions;
 uint32_t currentEvent = 0;
 std::string diagnosticPath;
+std::string lastPreviewError;
 
 // An append-only checkpoint survives SIGSEGV/SIGABRT in the :replay process.
 // Each entry is committed before potentially crashing native driver calls.
@@ -127,6 +128,7 @@ void closeCapture()
   }
   actions.clear();
   currentEvent = 0;
+  lastPreviewError.clear();
 }
 
 void flatten(const rdcarray<ActionDescription> &children, uint32_t depth, const SDFile &structured)
@@ -331,13 +333,121 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeSeek(JNIEnv *env, jclass, jint re
   return env->NewStringUTF(response.c_str());
 }
 
+// Serialise exactly one small RGBA8 image to Java.
+// The header carries uint32 little-endian width and height.
+static jbyteArray makePreview(JNIEnv *env, int width, int height,
+                             const unsigned char *rgba, size_t length)
+{
+  if(width <= 0 || height <= 0 || width > 512 || height > 512)
+    return nullptr;
+  const size_t expected = (size_t)width * (size_t)height * 4;
+  if(!rgba || length != expected || expected > 512U * 512U * 4U)
+    return nullptr;
+  jbyteArray result = env->NewByteArray((jsize)(expected + 8));
+  if(!result) return nullptr;
+  unsigned char dimensions[8]{};
+  for(int i = 0; i < 4; ++i)
+  {
+    dimensions[i] = (unsigned char)(((uint32_t)width >> (i * 8)) & 255);
+    dimensions[i + 4] = (unsigned char)(((uint32_t)height >> (i * 8)) & 255);
+  }
+  env->SetByteArrayRegion(result, 0, 8, (const jbyte *)dimensions);
+  env->SetByteArrayRegion(result, 8, (jsize)expected, (const jbyte *)rgba);
+  return result;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_org_renderdoc_mobile_ReplayActivity_nativeLastPreviewError(JNIEnv *env, jclass)
+{
+  std::lock_guard<std::mutex> lock(replayMutex);
+  return env->NewStringUTF(lastPreviewError.c_str());
+}
+
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_org_renderdoc_mobile_ReplayActivity_nativeTexturePreview(JNIEnv *env, jclass,
                                                                jint index, jint maxSide)
 {
   std::lock_guard<std::mutex> lock(replayMutex);
-  if(!controller || index < 0 || maxSide < 1)
+  lastPreviewError.clear();
+  if(!controller)
+  {
+    lastPreviewError = "Replay controller is not open";
     return nullptr;
+  }
+  if(index < 0 || maxSide < 1)
+  {
+    lastPreviewError = "Invalid texture index or size";
+    return nullptr;
+  }
+
+  const auto &textures = controller->GetTextures();
+  if((size_t)index >= textures.size())
+  {
+    lastPreviewError = "Texture index is outside the replay resource list";
+    return nullptr;
+  }
+  const TextureDescription &tex = textures[(size_t)index];
+  if(!tex.width || !tex.height || tex.width > 16384 || tex.height > 16384)
+  {
+    lastPreviewError = "Texture has invalid or unsupported dimensions";
+    return nullptr;
+  }
+
+  const int maxDimension = std::min(512, std::max(32, (int)maxSide));
+  const double scale = std::min(1.0, (double)maxDimension /
+                                            (double)std::max(tex.width, tex.height));
+  const int width = std::max(1, (int)(tex.width * scale));
+  const int height = std::max(1, (int)(tex.height * scale));
+
+  // RenderDoc's GetTextureData() retrieves the selected event's actual
+  // subresource contents. Transfer-only images used by the self-capture demo
+  // aren't necessarily legal to bind as sampled images for DrawThumbnail().
+  // For ordinary RGBA8/BGRA8 2D textures, read back without another GPU draw.
+  const bool rgba8 = tex.format.type == ResourceFormatType::Regular &&
+                     tex.format.compCount == 4 &&
+                     tex.format.compByteWidth == 1 &&
+                     (tex.format.compType == CompType::UNorm ||
+                      tex.format.compType == CompType::UNormSRGB);
+  const uint64_t sourceBytes = uint64_t(tex.width) * uint64_t(tex.height) * 4U;
+  if(rgba8 && sourceBytes <= 32ULL * 1024ULL * 1024ULL &&
+     tex.depth == 1 && tex.arraysize >= 1 && tex.mips >= 1 &&
+     tex.msSamp <= 1)
+  {
+    checkpoint("GetTextureData RGBA8: entering");
+    const bytebuf raw = controller->GetTextureData(tex.resourceId, Subresource(0, 0, 0));
+    checkpoint("GetTextureData RGBA8: returned");
+    if(raw.size() == sourceBytes)
+    {
+      const bool bgra = tex.format.BGRAOrder();
+      std::vector<unsigned char> pixels((size_t)width * (size_t)height * 4U);
+      const unsigned char *data = raw.data();
+      for(int y = 0; y < height; ++y)
+      {
+        const uint32_t sy = std::min(tex.height - 1U,
+                                    uint32_t(uint64_t(y) * tex.height / height));
+        for(int x = 0; x < width; ++x)
+        {
+          const uint32_t sx = std::min(tex.width - 1U,
+                                      uint32_t(uint64_t(x) * tex.width / width));
+          const size_t src = (size_t(sy) * tex.width + sx) * 4U;
+          const size_t dst = (size_t(y) * width + x) * 4U;
+          pixels[dst] = data[src + (bgra ? 2 : 0)];
+          pixels[dst + 1] = data[src + 1];
+          pixels[dst + 2] = data[src + (bgra ? 0 : 2)];
+          pixels[dst + 3] = data[src + 3];
+        }
+      }
+      checkpoint("GetTextureData RGBA8: preview generated");
+      return makePreview(env, width, height, pixels.data(), pixels.size());
+    }
+    lastPreviewError = "GetTextureData returned " + std::to_string(raw.size()) +
+                       " bytes, expected " + std::to_string(sourceBytes) +
+                       "; falling back to GPU thumbnail";
+  }
+
+  // For compressed, depth, HDR, multisampled, or very large textures, let
+  // RenderDoc's own GPU display path do format conversion and scaling.
+  // Preserve the error details for unsupported device/output combinations.
   if(!output)
   {
     checkpoint("CreateOutput Headless: entering");
@@ -345,46 +455,28 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeTexturePreview(JNIEnv *env, jclas
     window.system = WindowingSystem::Unknown;
     output = controller->CreateOutput(window, ReplayOutputType::Headless);
     checkpoint("CreateOutput Headless: returned");
-    if(!output) return nullptr;
+    if(!output)
+    {
+      lastPreviewError += " / CreateOutput(Headless) returned null";
+      return nullptr;
+    }
   }
-
-  const auto &textures = controller->GetTextures();
-  if((size_t)index >= textures.size())
-    return nullptr;
-  const TextureDescription &tex = textures[(size_t)index];
-  if(!tex.width || !tex.height)
-    return nullptr;
-
-  const int maxDimension = std::min(512, std::max(32, (int)maxSide));
-  const double scale = std::min(1.0, (double)maxDimension /
-                                                (double)std::max(tex.width, tex.height));
-  const int width = std::max(1, (int)(tex.width * scale));
-  const int height = std::max(1, (int)(tex.height * scale));
-
-  // DrawThumbnail renders the *selected event's GPU texture contents* via
-  // RenderDoc's replay output; it is not the embedded RDC screenshot.
   checkpoint("DrawThumbnail: entering");
   const bytebuf rgba = output->DrawThumbnail(width, height, tex.resourceId,
                                               Subresource(0, 0, 0), CompType::Typeless);
   checkpoint("DrawThumbnail: returned");
-  const size_t expected = (size_t)width * (size_t)height * 4;
-  if(rgba.size() != expected || expected > 512 * 512 * 4)
-    return nullptr;
-
-  jbyteArray encoded = env->NewByteArray((jsize)(expected + 8));
-  if(!encoded)
-    return nullptr;
-
-  // Prefix 2 little-endian uint32s for width/height, then tightly packed RGBA8.
-  unsigned char dimensions[8]{};
-  for(int i = 0; i < 4; ++i)
+  const size_t expected = (size_t)width * (size_t)height * 4U;
+  if(rgba.size() != expected)
   {
-    dimensions[i] = (unsigned char)(((uint32_t)width >> (i * 8)) & 255);
-    dimensions[4 + i] = (unsigned char)(((uint32_t)height >> (i * 8)) & 255);
+    lastPreviewError += " / DrawThumbnail returned " + std::to_string(rgba.size()) +
+                        " bytes, expected " + std::to_string(expected);
+    return nullptr;
   }
-  env->SetByteArrayRegion(encoded, 0, 8, (const jbyte *)dimensions);
-  env->SetByteArrayRegion(encoded, 8, (jsize)expected, (const jbyte *)rgba.data());
-  return encoded;
+
+  jbyteArray result = makePreview(env, width, height, rgba.data(), rgba.size());
+  if(!result)
+    lastPreviewError = "Failed to create Java RGBA8 preview buffer";
+  return result;
 }
 
 extern "C" JNIEXPORT void JNICALL
