@@ -9,6 +9,7 @@ on:
       - .github/workflows/android-mobile-core.yml
       - CMakeLists.txt
       - renderdoc/**
+      - mobile/**
 
 permissions:
   contents: read
@@ -89,5 +90,16 @@ jobs:
         with:
           name: renderdoc-command-arm64-apk
           path: build-android-arm64/bin/org.renderdoc.renderdoccmd.arm64.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build standalone RenderDoc Mobile inspector APK
+        run: bash mobile/android/build-apk.sh
+
+      - name: Upload RenderDoc Mobile inspector APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderdoc-mobile-arm64-debug
+          path: dist/RenderDoc-Mobile-ARM64-Debug.apk
           if-no-files-found: error
           retention-days: 7
