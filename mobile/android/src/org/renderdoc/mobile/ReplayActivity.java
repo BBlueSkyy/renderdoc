@@ -9,6 +9,7 @@ package org.renderdoc.mobile;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.net.Uri;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -24,7 +25,12 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +42,12 @@ public final class ReplayActivity extends Activity {
     private static final int ACCENT = Color.rgb(89, 163, 239);
     private static final int MUTED = Color.rgb(170, 179, 194);
     private static final int PAGE_SIZE = 40;
+    private static final int SAVE_AI_DIAGNOSTICS = 1901;
+    private static final String[] AI_FILES = {
+        "README.txt", "manifest.json", "events.jsonl", "resources.jsonl",
+        "textures.jsonl", "buffers.jsonl", "resource-usage.jsonl",
+        "pipeline-samples.jsonl", "shader-disassembly.jsonl", "debug-messages.jsonl"
+    };
 
     private static final String LOAD_ERROR;
     static {
@@ -57,6 +69,7 @@ public final class ReplayActivity extends Activity {
     private static native String[] nativeActions(int start, int size);
     private static native String[] nativeTextures(int start, int size);
     private static native String nativeSeek(int eventId);
+    private static native String nativeExportAI(String directory);
     private static native byte[] nativeTexturePreview(int textureIndex, int maxSide);
     private static native String nativeLastPreviewError();
     private static native void nativeClose();
@@ -64,6 +77,8 @@ public final class ReplayActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private volatile boolean destroyed;
     private boolean opened;
+    private boolean exportAIMode;
+    private File aiReportDirectory;
     private boolean showingTextures;
     private int currentPage;
     private int totalActions;
@@ -80,6 +95,7 @@ public final class ReplayActivity extends Activity {
 
     @Override public void onCreate(Bundle bundle) {
         super.onCreate(bundle);
+        exportAIMode = getIntent().getBooleanExtra("ai_export", false);
         getWindow().setStatusBarColor(BACKGROUND);
         getWindow().setNavigationBarColor(BACKGROUND);
 
@@ -91,10 +107,13 @@ public final class ReplayActivity extends Activity {
         scroll.addView(page);
         setContentView(scroll);
 
-        page.addView(label("Vulkan frame replay", 24, Color.WHITE, true));
+        page.addView(label(exportAIMode ? "AI Vulkan diagnostics" : "Vulkan frame replay", 24, Color.WHITE, true));
         TextView explanation = label(
-                "Actual GPU replay / Event Browser / Texture Viewer. " +
-                "Large captures may exhaust device memory.", 12, MUTED, false);
+                exportAIMode
+                    ? "Automatic Vulkan events, resources, sampled pipelines and shaders " +
+                      "for AI analysis. The original RDC must be shared separately."
+                    : "Actual GPU replay / Event Browser / Texture Viewer. " +
+                      "Large captures may exhaust device memory.", 12, MUTED, false);
         explanation.setPadding(0, dp(8), 0, dp(14));
         page.addView(explanation);
 
@@ -207,9 +226,18 @@ public final class ReplayActivity extends Activity {
                             detail.setText(result[1] + "\nEvents: " + totalActions +
                                     "  /  Textures: " + totalTextures +
                                     "\nSelect an event, then a texture to see its replayed contents.");
-                            actionsButton.setEnabled(true);
-                            texturesButton.setEnabled(true);
-                            fetchPage();
+                            if(exportAIMode) {
+                                actionsButton.setVisibility(View.GONE);
+                                texturesButton.setVisibility(View.GONE);
+                                previousButton.setVisibility(View.GONE);
+                                nextButton.setVisibility(View.GONE);
+                                listing.removeAllViews();
+                                beginAIExport();
+                            } else {
+                                actionsButton.setEnabled(true);
+                                texturesButton.setEnabled(true);
+                                fetchPage();
+                            }
                         }
                     });
                 } catch(final Throwable failure) {
@@ -219,6 +247,127 @@ public final class ReplayActivity extends Activity {
                         @Override public void run() {
                             status.setText("Replay error");
                             detail.setText(failure.toString());
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    private void beginAIExport() {
+        status.setText("Extracting Vulkan diagnostics...");
+        detail.setText("Reading events, resources and sampled replay states.\n" +
+                "Large game captures can use substantial GPU memory.");
+        final File folder = new File(getCacheDir(), "ai-diagnostics");
+        worker.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    if(!folder.exists() && !folder.mkdirs())
+                        throw new IOException("Cannot create private diagnostic folder");
+                    File[] old = folder.listFiles();
+                    if(old != null)
+                        for(File entry : old)
+                            if(entry.isFile() && !entry.delete())
+                                throw new IOException("Could not clear previous diagnostics");
+                    final String outcome = nativeExportAI(folder.getAbsolutePath());
+                    if(outcome == null || !outcome.startsWith("ok:"))
+                        throw new IOException(outcome == null ? "Native extraction failed" : outcome);
+                    aiReportDirectory = folder;
+                    ReplayDiagnostics.append(ReplayActivity.this, "AI report: " + outcome);
+                    post(new Runnable() {
+                        @Override public void run() {
+                            status.setText("AI diagnostic report ready");
+                            detail.setText(outcome + "\n\nChoose where to save the ZIP. " +
+                                    "Then send it with the original .rdc and Strato emulation.log.");
+                            Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                            save.setType("application/zip");
+                            save.addCategory(Intent.CATEGORY_OPENABLE);
+                            save.putExtra(Intent.EXTRA_TITLE, "renderdoc-ai-diagnostics.zip");
+                            startActivityForResult(save, SAVE_AI_DIAGNOSTICS);
+                        }
+                    });
+                } catch(final Throwable failure) {
+                    ReplayDiagnostics.append(ReplayActivity.this,
+                            "AI export failed: " + failure.toString());
+                    post(new Runnable() {
+                        @Override public void run() {
+                            status.setText("AI diagnostics unavailable");
+                            detail.setText(failure.toString() +
+                                    "\n\nYou can still send the original .rdc and emulation.log. " +
+                                    "If the subprocess crashed, export replay crash diagnostics " +
+                                    "from the main screen.");
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    @Override protected void onActivityResult(int request, int resultCode, Intent data) {
+        super.onActivityResult(request, resultCode, data);
+        if(request != SAVE_AI_DIAGNOSTICS) return;
+        if(resultCode != RESULT_OK || data == null || data.getData() == null) {
+            status.setText("Report generated; ZIP saving cancelled");
+            return;
+        }
+        final Uri destination = data.getData();
+        final File folder = aiReportDirectory;
+        status.setText("Writing AI diagnostics ZIP...");
+        worker.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    if(folder == null || !folder.isDirectory())
+                        throw new IOException("Diagnostic files not found");
+                    OutputStream raw = getContentResolver().openOutputStream(destination, "w");
+                    if(raw == null) throw new IOException("Cannot write selected file");
+                    try(ZipOutputStream zip = new ZipOutputStream(raw)) {
+                        long total = 0;
+                        byte[] buffer = new byte[32 * 1024];
+                        for(String name : AI_FILES) {
+                            File source = new File(folder, name);
+                            if(!source.isFile())
+                                throw new IOException("Missing diagnostic file: " + name);
+                            zip.putNextEntry(new ZipEntry(name));
+                            try(InputStream input = new FileInputStream(source)) {
+                                int count;
+                                while((count = input.read(buffer)) != -1) {
+                                    total += count;
+                                    if(total > 96L * 1024L * 1024L)
+                                        throw new IOException("Diagnostics exceeded 96 MiB limit");
+                                    zip.write(buffer, 0, count);
+                                }
+                            }
+                            zip.closeEntry();
+                        }
+                        File trace = ReplayDiagnostics.traceFile(ReplayActivity.this);
+                        if(trace.isFile()) {
+                            zip.putNextEntry(new ZipEntry("replay-steps.txt"));
+                            try(InputStream input = new FileInputStream(trace)) {
+                                int count;
+                                while((count = input.read(buffer)) != -1) {
+                                    total += count;
+                                    if(total > 96L * 1024L * 1024L)
+                                        throw new IOException("Diagnostics size limit exceeded");
+                                    zip.write(buffer, 0, count);
+                                }
+                            }
+                            zip.closeEntry();
+                        }
+                    }
+                    post(new Runnable() {
+                        @Override public void run() {
+                            status.setText("AI diagnostics exported");
+                            detail.setText("ZIP saved. Send the ZIP and original .rdc, " +
+                                    "with emulation.log, for analysis. No code defect is " +
+                                    "automatically proven by this report.");
+                        }
+                    });
+                } catch(final Throwable failure) {
+                    post(new Runnable() {
+                        @Override public void run() {
+                            status.setText("AI diagnostics save failed");
+                            detail.setText(failure.toString() +
+                                    "\nDiscard the incomplete ZIP. Retry the export.");
                         }
                     });
                 }
