@@ -72,6 +72,18 @@ jobjectArray error(JNIEnv *env, const std::string &message)
   return array(env, {"error", message, "0", "0"});
 }
 
+// RenderDoc's ResultDetails::Message() may inline DoStringise<ResultCode>(),
+// which is internal to the core and not exported from Android layer builds.
+// Decode the public status code and its optional native detail without depending
+// on a non-exported C++ symbol.
+std::string replayErrorText(const ResultDetails &result)
+{
+  std::string text = "RenderDoc status " + std::to_string((uint32_t)result.code);
+  if(result.internal_msg)
+    text += ": " + std::string(result.internal_msg->c_str());
+  return text;
+}
+
 void closeCapture()
 {
   // Output is owned by ReplayController and destroyed on controller shutdown.
@@ -152,7 +164,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring
   ResultDetails metadata = openFile->OpenFile(path.c_str(), "rdc");
   if(!metadata.OK())
   {
-    const std::string message = metadata.Message().c_str();
+    const std::string message = replayErrorText(metadata);
     closeCapture();
     return error(env, "Invalid RDC capture: " + message);
   }
@@ -162,7 +174,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeOpen(JNIEnv *env, jclass, jstring
   const auto result = openFile->OpenCapture(ReplayOptions{});
   if(!result.first.OK() || !result.second)
   {
-    const std::string message = result.first.Message().c_str();
+    const std::string message = replayErrorText(result.first);
     if(result.second)
       result.second->Shutdown();
     closeCapture();
