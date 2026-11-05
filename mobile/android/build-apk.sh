@@ -42,6 +42,7 @@ javac -source 7 -target 7 \
   "$APP/src/org/renderdoc/mobile/DemoCaptureActivity.java" \
   "$APP/src/org/renderdoc/mobile/ReplayActivity.java" \
   "$APP/src/org/renderdoc/mobile/ReplayDiagnostics.java" \
+  "$APP/src/org/renderdoc/mobile/ReplayMarker.java" \
   "$STAGE/gen/org/renderdoc/mobile/R.java"
 
 "$TOOLS/dx" --dex --output="$STAGE/bin/classes.dex" "$STAGE/obj"
@@ -49,12 +50,13 @@ javac -source 7 -target 7 \
 cp "$CORE/lib/libVkLayer_GLES_RenderDoc.so" "$STAGE/libs/lib/arm64-v8a/"
 cp "$BUILD/native/lib/librenderdoc_mobile_jni.so" "$STAGE/libs/lib/arm64-v8a/"
 cp "$BUILD/native/lib/librenderdoc_replay_jni.so" "$STAGE/libs/lib/arm64-v8a/"
+cp "$BUILD/native/lib/librenderdoc_replay_marker.so" "$STAGE/libs/lib/arm64-v8a/"
 cp "$BUILD/native/lib/librenderdoc_vulkan_demo.so" "$STAGE/libs/lib/arm64-v8a/"
 
 (
   cd "$STAGE"
   "$TOOLS/aapt" package -f -M "$APP/AndroidManifest.xml" -S "$APP/res" \
-    -I "$JAR" --version-code 4 --version-name "0.3.1" \
+    -I "$JAR" --version-code 5 --version-name "0.3.2" \
     -F unsigned.apk bin libs
   "$TOOLS/zipalign" -f 4 unsigned.apk aligned.apk
 

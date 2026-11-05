@@ -38,3 +38,7 @@ If the `Vulkan frame replay` screen disappears as soon as `Opening capture on th
 - There is no requirement to install ADB, Shizuku or root. Tombstones may be evicted by Android before export; in that case the stage and exit reason remain valuable.
 
 **Reproduction protocol:** use the tiny app-generated RDC first, tap replay once, then (if the subprocess closes) export and share the diagnostic ZIP from the main inspector. Diagnose the first native failure using these records before implementing additional speculative GPU fixes. Only move to the larger SpongeBob RDC after the small capture opens successfully.
+
+## v0.3.2: correct replay bootstrap
+
+RenderDoc requires the `renderdoc__replay__marker` symbol globally visible before `libVkLayer_GLES_RenderDoc.so` loads. Without it, the core mistakenly initialises as a capture app and hooks graphics APIs. The Android `:replay` process now first loads `librenderdoc_replay_marker.so`, promotes the marker via `dlopen(RTLD_GLOBAL)`, verifies it with `dlsym(RTLD_DEFAULT)`, **then** loads the replay JNI library and its RenderDoc core dependency. An unavailable marker is reported instead of starting broken GPU replay. This mode transition is isolated from the normal capture and metadata-inspection processes.

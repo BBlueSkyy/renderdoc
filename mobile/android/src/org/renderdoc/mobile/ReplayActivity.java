@@ -41,6 +41,11 @@ public final class ReplayActivity extends Activity {
     static {
         String failure = null;
         try {
+            // Unlike the metadata inspector, this process must be recognised
+            // as a replay app before the RenderDoc core library is constructed.
+            System.loadLibrary("renderdoc_replay_marker");
+            if(!ReplayMarker.enableGlobal())
+                throw new UnsatisfiedLinkError("Replay marker not globally visible to Android linker");
             System.loadLibrary("renderdoc_replay_jni");
         } catch (Throwable error) {
             failure = error.toString();

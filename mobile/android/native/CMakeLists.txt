@@ -28,6 +28,13 @@ target_link_libraries(renderdoc_mobile_jni PRIVATE renderdoc_core dl log)
 set_target_properties(renderdoc_mobile_jni PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
+# Minimal replay marker must load globally BEFORE RenderDoc core constructors.
+# Do not link this target against renderdoc_core: that would load the core too soon.
+add_library(renderdoc_replay_marker SHARED replay_marker.cpp)
+target_link_libraries(renderdoc_replay_marker PRIVATE dl)
+set_target_properties(renderdoc_replay_marker PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
 # Real Vulkan replay bridge in a dedicated Android process.
 add_library(renderdoc_replay_jni SHARED renderdoc_replay_jni.cpp)
 target_compile_definitions(renderdoc_replay_jni PRIVATE RENDERDOC_PLATFORM_ANDROID)
