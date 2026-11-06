@@ -855,6 +855,14 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     const std::string base = "present_" + std::to_string(copy.eventId);
     checkpoint("AI export: before candidate image copy");
     controller->SetFrameEvent(beforeEvent, false);
+    const uint64_t bytesExpected = uint64_t(src->width) * uint64_t(src->height) * 4U;
+    const bool canCompare = bytesExpected > 0 && bytesExpected <= 16ULL * 1024ULL * 1024ULL;
+    bytebuf sourcePixels;
+    if(canCompare)
+    {
+      checkpoint("AI export: source GetTextureData before copy");
+      sourcePixels = controller->GetTextureData(src->resourceId, Subresource(0, 0, 0));
+    }
     const std::string sourceBefore = aiSaveImage(folder, base + "_source_before", *src,
                                                   FileType::PNG, 12 * 1024 * 1024);
     const std::string destBefore = aiSaveImage(folder, base + "_dest_before", *dst,
@@ -869,6 +877,20 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     }
     checkpoint("AI export: after candidate image copy");
     controller->SetFrameEvent(copy.eventId, false);
+    bytebuf destinationPixels;
+    if(canCompare)
+    {
+      checkpoint("AI export: destination GetTextureData after copy");
+      destinationPixels = controller->GetTextureData(dst->resourceId, Subresource(0, 0, 0));
+    }
+    const bool pixelsCompared = canCompare && sourcePixels.size() == bytesExpected &&
+                                destinationPixels.size() == bytesExpected;
+    uint64_t changedPixels = 0;
+    if(pixelsCompared)
+      for(size_t pixel = 0; pixel < (size_t)(bytesExpected / 4U); ++pixel)
+        if(std::memcmp(sourcePixels.data() + 4U * pixel,
+                       destinationPixels.data() + 4U * pixel, 4U) != 0)
+          ++changedPixels;
     const std::string destAfter = aiSaveImage(folder, base + "_dest_after", *dst,
                                                FileType::PNG, 12 * 1024 * 1024);
     presentImagesSaved += !sourceBefore.empty();
@@ -882,12 +904,17 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
                      << ",\"source_before_png\":" << aiQuote(sourceBefore)
                      << ",\"destination_before_png\":" << aiQuote(destBefore)
                      << ",\"destination_after_png\":" << aiQuote(destAfter)
+                     << ",\"source_raw_bytes\":" << sourcePixels.size()
+                     << ",\"destination_raw_bytes\":" << destinationPixels.size()
+                     << ",\"full_image_bytes_compared\":" << (pixelsCompared ? bytesExpected : 0)
+                     << ",\"different_pixels\":"
+                     << (pixelsCompared ? std::to_string(changedPixels) : "null")
                      << ",\"other_draw_event_id\":" << (otherDraw ? otherDraw->eventId : 0)
                      << ",\"other_draw_texture_id\":"
                      << aiQuote(otherTarget ? aiId(otherTarget->resourceId) : aiId(ResourceId()))
                      << ",\"other_draw_after_png\":" << aiQuote(otherAfter)
                      << ",\"classification\":\"last_rgba8_image_copy_candidate\","
-                     << "\"note\":\"Other same-size draw output is not proven to produce the copy source; empty PNG means unavailable\"}\n";
+                     << "\"note\":\"Pixel difference is descriptive, not proof of corruption: partial copy regions or format interpretation can differ; same-size draw is not a verified producer; empty PNG means unavailable\"}\n";
     ++presentCopiesAttempted;
     break;
   }
