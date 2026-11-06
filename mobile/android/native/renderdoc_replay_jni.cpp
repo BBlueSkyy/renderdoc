@@ -474,15 +474,32 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeTexturePreview(JNIEnv *env, jclas
   const bytebuf rgba = output->DrawThumbnail(width, height, tex.resourceId,
                                               Subresource(0, 0, 0), CompType::Typeless);
   checkpoint("DrawThumbnail: returned");
-  const size_t expected = (size_t)width * (size_t)height * 4U;
-  if(rgba.size() != expected)
+  const size_t pixelCount = (size_t)width * (size_t)height;
+  const size_t expected = pixelCount * 4U;
+  // DrawThumbnail may return RGB8. Java always expects RGBA8, so expand
+  // the 3-channel result with fully opaque alpha; preserve native RGBA8.
+  std::vector<unsigned char> expanded;
+  if(rgba.size() == pixelCount * 3U)
+  {
+    expanded.resize(expected);
+    for(size_t pixel = 0; pixel < pixelCount; ++pixel)
+    {
+      expanded[4 * pixel] = rgba[3 * pixel];
+      expanded[4 * pixel + 1] = rgba[3 * pixel + 1];
+      expanded[4 * pixel + 2] = rgba[3 * pixel + 2];
+      expanded[4 * pixel + 3] = 255;
+    }
+  }
+  else if(rgba.size() != expected)
   {
     lastPreviewError += " / DrawThumbnail returned " + std::to_string(rgba.size()) +
-                        " bytes, expected " + std::to_string(expected);
+                        " bytes; expected RGB8 (" + std::to_string(pixelCount * 3U) +
+                        ") or RGBA8 (" + std::to_string(expected) + ")";
     return nullptr;
   }
 
-  jbyteArray result = makePreview(env, width, height, rgba.data(), rgba.size());
+  const unsigned char *pixels = expanded.empty() ? rgba.data() : expanded.data();
+  jbyteArray result = makePreview(env, width, height, pixels, expected);
   if(!result)
     lastPreviewError = "Failed to create Java RGBA8 preview buffer";
   return result;
