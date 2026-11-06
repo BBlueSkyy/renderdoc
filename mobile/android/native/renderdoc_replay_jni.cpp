@@ -35,6 +35,8 @@ struct ActionRow {
   uint32_t depth;
   std::string name;
   std::vector<ResourceId> colourOutputs;
+  ResourceId copySource;
+  ResourceId copyDestination;
 };
 
 std::mutex replayMutex;
@@ -149,7 +151,7 @@ void flatten(const rdcarray<ActionDescription> &children, uint32_t depth, const 
     for(char &c : name)
       if(c == '\n' || c == '\r' || c == '\t')
         c = ' ';
-    ActionRow row{a.eventId, depth, name, {}};
+    ActionRow row{a.eventId, depth, name, {}, a.copySource, a.copyDestination};
     for(const ResourceId out : a.outputs)
       if(out != ResourceId()) row.colourOutputs.push_back(out);
     actions.push_back(std::move(row));
@@ -675,13 +677,14 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   std::ofstream messages = aiFile(folder, "debug-messages.jsonl");
   std::ofstream descriptorDetails = aiFile(folder, "descriptor-details.jsonl");
   std::ofstream hdrSnapshots = aiFile(folder, "hdr-snapshots.jsonl");
+  std::ofstream presentSnapshots = aiFile(folder, "present-snapshots.jsonl");
   std::ofstream materialTextures = aiFile(folder, "material-textures.jsonl");
   std::ofstream shaderArtifacts = aiFile(folder, "shader-artifacts.jsonl");
   std::ofstream manifest = aiFile(folder, "manifest.json");
   std::ofstream readme = aiFile(folder, "README.txt");
   if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
      !pipeline || !shaders || !messages || !descriptorDetails ||
-     !hdrSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
+     !hdrSnapshots || !presentSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
     return env->NewStringUTF("ERROR:Could not create all output files");
 
   readme <<
@@ -698,6 +701,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     "debug-messages.jsonl: messages available from RenderDoc replay.\n"
     "descriptor-details.jsonl: accessed Vulkan descriptor contents at sampled events.\n"
     "hdr-snapshots.jsonl: selected HDR render target PNG + EXR before/after draws.\n"
+    "present-snapshots.jsonl: latest matching RGBA8 image copy, source and destination pre-copy, destination post-copy, separate same-size draw target.\n"
     "material-textures.jsonl: selected BC1/BC5 material views and DDS/PNG content.\n"
     "shader-artifacts.jsonl: selected original fragment SPIR-V/binary metadata.\n"
     "PNG is a [0,8] SDR preview; EXR may preserve HDR. BC DDS preserves blocks.\n"
@@ -788,6 +792,105 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     writeUsage(textures[idx].resourceId, "texture");
   for(size_t i = 0; i < buffers.size() && i < maxUsageBuffers; ++i)
     writeUsage(buffers[i].resourceId, "buffer");
+
+
+  // This selects the last image copy with compatible RGBA8 source/destination.
+  // It is only a candidate presentation copy, not proof of a swapchain path.
+  size_t presentCopiesAttempted = 0, presentImagesSaved = 0;
+  for(size_t n = actions.size(); n > 1; --n)
+  {
+    const size_t copyIndex = n - 1;
+    const ActionRow &copy = actions[copyIndex];
+    if(copy.name.find("CopyImage") == std::string::npos &&
+       copy.name.find("BlitImage") == std::string::npos)
+      continue;
+    if(copy.copySource == ResourceId() || copy.copyDestination == ResourceId() ||
+       copy.copySource == copy.copyDestination)
+      continue;
+    const TextureDescription *src = aiFindTexture(textures, copy.copySource);
+    const TextureDescription *dst = aiFindTexture(textures, copy.copyDestination);
+    if(!src || !dst || src->width != dst->width || src->height != dst->height ||
+       src->depth != 1 || dst->depth != 1 || !src->width || !src->height ||
+       src->width > 4096 || src->height > 4096 ||
+       src->byteSize > 32ULL * 1024ULL * 1024ULL ||
+       dst->byteSize > 32ULL * 1024ULL * 1024ULL)
+      continue;
+    auto simpleRGBA8 = [](const TextureDescription &tex) {
+      return tex.format.type == ResourceFormatType::Regular &&
+             tex.format.compCount == 4 && tex.format.compByteWidth == 1 &&
+             (tex.format.compType == CompType::UNorm ||
+              tex.format.compType == CompType::UNormSRGB) &&
+             tex.msSamp <= 1 && tex.arraysize == 1 && tex.mips >= 1;
+    };
+    if(!simpleRGBA8(*src) || !simpleRGBA8(*dst))
+      continue;
+
+    const uint32_t beforeEvent = actions[copyIndex - 1].eventId;
+    if(!beforeEvent || beforeEvent >= copy.eventId)
+      continue;
+    // Another render target of the same size is useful to compare, but is
+    // not necessarily the producer of the copy source.
+    const ActionRow *otherDraw = nullptr;
+    const TextureDescription *otherTarget = nullptr;
+    for(size_t k = copyIndex; k > 0 && !otherDraw; --k)
+    {
+      const ActionRow &draw = actions[k - 1];
+      if(draw.name.find("Draw") == std::string::npos)
+        continue;
+      for(ResourceId id : draw.colourOutputs)
+      {
+        if(id == copy.copySource || id == copy.copyDestination)
+          continue;
+        const TextureDescription *candidate = aiFindTexture(textures, id);
+        if(candidate && simpleRGBA8(*candidate) &&
+           candidate->width == src->width && candidate->height == src->height)
+        {
+          otherDraw = &draw;
+          otherTarget = candidate;
+          break;
+        }
+      }
+    }
+
+    const std::string base = "present_" + std::to_string(copy.eventId);
+    checkpoint("AI export: before candidate image copy");
+    controller->SetFrameEvent(beforeEvent, false);
+    const std::string sourceBefore = aiSaveImage(folder, base + "_source_before", *src,
+                                                  FileType::PNG, 12 * 1024 * 1024);
+    const std::string destBefore = aiSaveImage(folder, base + "_dest_before", *dst,
+                                                FileType::PNG, 12 * 1024 * 1024);
+    std::string otherAfter;
+    if(otherDraw && otherTarget)
+    {
+      checkpoint("AI export: separate RGBA8 draw target");
+      controller->SetFrameEvent(otherDraw->eventId, false);
+      otherAfter = aiSaveImage(folder, base + "_other_draw_after", *otherTarget,
+                               FileType::PNG, 12 * 1024 * 1024);
+    }
+    checkpoint("AI export: after candidate image copy");
+    controller->SetFrameEvent(copy.eventId, false);
+    const std::string destAfter = aiSaveImage(folder, base + "_dest_after", *dst,
+                                               FileType::PNG, 12 * 1024 * 1024);
+    presentImagesSaved += !sourceBefore.empty();
+    presentImagesSaved += !destBefore.empty();
+    presentImagesSaved += !destAfter.empty();
+    presentImagesSaved += !otherAfter.empty();
+    presentSnapshots << "{\"copy_event_id\":" << copy.eventId
+                     << ",\"before_event_id\":" << beforeEvent
+                     << ",\"copy_source_id\":" << aiQuote(aiId(copy.copySource))
+                     << ",\"copy_destination_id\":" << aiQuote(aiId(copy.copyDestination))
+                     << ",\"source_before_png\":" << aiQuote(sourceBefore)
+                     << ",\"destination_before_png\":" << aiQuote(destBefore)
+                     << ",\"destination_after_png\":" << aiQuote(destAfter)
+                     << ",\"other_draw_event_id\":" << (otherDraw ? otherDraw->eventId : 0)
+                     << ",\"other_draw_texture_id\":"
+                     << aiQuote(otherTarget ? aiId(otherTarget->resourceId) : aiId(ResourceId()))
+                     << ",\"other_draw_after_png\":" << aiQuote(otherAfter)
+                     << ",\"classification\":\"last_rgba8_image_copy_candidate\","
+                     << "\"note\":\"Other same-size draw output is not proven to produce the copy source; empty PNG means unavailable\"}\n";
+    ++presentCopiesAttempted;
+    break;
+  }
 
   checkpoint("AI export: Vulkan pipeline samples");
   std::vector<size_t> candidates;
@@ -1085,6 +1188,8 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
            << "\"pipelines_sampled\":" << snapshotCount << ","
            << "\"shaders_disassembled\":" << disassemblyCount << ","
            << "\"hdr_draw_pairs_attempted\":" << hdrPairsExported << ","
+           << "\"present_copy_candidates_attempted\":" << presentCopiesAttempted << ","
+           << "\"present_images_saved\":" << presentImagesSaved << ","
            << "\"bc_material_textures_attempted\":" << bcAssetsExported << ","
            << "\"fragment_shader_binaries_attempted\":" << fragmentBinariesExported << ","
            << "\"accessed_descriptors_exported\":" << descriptorRows << ","
@@ -1095,11 +1200,11 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   // Explicitly flush/check all files before telling Java the ZIP is ready.
   events.flush(); resourceFile.flush(); textureFile.flush(); bufferFile.flush();
   uses.flush(); pipeline.flush(); shaders.flush(); messages.flush();
-  descriptorDetails.flush(); hdrSnapshots.flush(); materialTextures.flush(); shaderArtifacts.flush();
+  descriptorDetails.flush(); hdrSnapshots.flush(); presentSnapshots.flush(); materialTextures.flush(); shaderArtifacts.flush();
   manifest.flush(); readme.flush();
   if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
      !pipeline || !shaders || !messages || !descriptorDetails ||
-     !hdrSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
+     !hdrSnapshots || !presentSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
     return env->NewStringUTF("ERROR:Filesystem error while writing diagnostic files");
 
   checkpoint("AI export: files complete");
