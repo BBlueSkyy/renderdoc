@@ -722,7 +722,10 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   {
     const ActionRow &a = actions[i];
     events << "{\"event_id\":" << a.eventId << ",\"depth\":" << a.depth
-           << ",\"name\":" << aiQuote(a.name) << "}\n";
+           << ",\"name\":" << aiQuote(a.name)
+           << ",\"copy_source_id\":" << aiQuote(aiId(a.copySource))
+           << ",\"copy_destination_id\":" << aiQuote(aiId(a.copyDestination))
+           << "}\n";
   }
 
   for(size_t i = 0; i < resources.size() && i < maxResources; ++i)
@@ -1004,6 +1007,9 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
       }
     }
   }
+
+  if(uploadCandidatesAttempted == 0)
+    uploadSnapshots << "{\"status\":\"no_matching_upload\",\"note\":\"No earlier CopyBufferToImage action targeting the selected copy source was found in this capture\"}\n";
 
   checkpoint("AI export: Vulkan pipeline samples");
   std::vector<size_t> candidates;
