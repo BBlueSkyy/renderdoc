@@ -50,7 +50,7 @@ public final class ReplayActivity extends Activity {
         "README.txt", "manifest.json", "events.jsonl", "resources.jsonl",
         "textures.jsonl", "buffers.jsonl", "resource-usage.jsonl",
         "pipeline-samples.jsonl", "shader-disassembly.jsonl", "debug-messages.jsonl",
-        "descriptor-details.jsonl", "hdr-snapshots.jsonl", "present-snapshots.jsonl", "material-textures.jsonl",
+        "descriptor-details.jsonl", "hdr-snapshots.jsonl", "present-snapshots.jsonl", "upload-snapshots.jsonl", "material-textures.jsonl",
         "shader-artifacts.jsonl"
     };
 
@@ -359,7 +359,7 @@ public final class ReplayActivity extends Activity {
                             for(File asset : assets) {
                                 String name = asset.getName();
                                 if(!asset.isFile() || !name.matches(
-                                        "^(snapshot_|present_|material_|fragment_)[A-Za-z0-9_]+\\.(png|exr|dds|spv|shaderbin)$"))
+                                        "^(snapshot_|present_|upload_|material_|fragment_)[A-Za-z0-9_]+\\.(png|exr|dds|spv|shaderbin)$"))
                                     continue;
                                 if(included >= 70 || asset.length() <= 0 ||
                                         asset.length() > 32L * 1024L * 1024L ||
