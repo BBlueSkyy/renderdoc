@@ -678,13 +678,14 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   std::ofstream descriptorDetails = aiFile(folder, "descriptor-details.jsonl");
   std::ofstream hdrSnapshots = aiFile(folder, "hdr-snapshots.jsonl");
   std::ofstream presentSnapshots = aiFile(folder, "present-snapshots.jsonl");
+  std::ofstream uploadSnapshots = aiFile(folder, "upload-snapshots.jsonl");
   std::ofstream materialTextures = aiFile(folder, "material-textures.jsonl");
   std::ofstream shaderArtifacts = aiFile(folder, "shader-artifacts.jsonl");
   std::ofstream manifest = aiFile(folder, "manifest.json");
   std::ofstream readme = aiFile(folder, "README.txt");
   if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
      !pipeline || !shaders || !messages || !descriptorDetails ||
-     !hdrSnapshots || !presentSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
+     !hdrSnapshots || !presentSnapshots || !uploadSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
     return env->NewStringUTF("ERROR:Could not create all output files");
 
   readme <<
@@ -702,6 +703,8 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
     "descriptor-details.jsonl: accessed Vulkan descriptor contents at sampled events.\n"
     "hdr-snapshots.jsonl: selected HDR render target PNG + EXR before/after draws.\n"
     "present-snapshots.jsonl: latest matching RGBA8 image copy, source and destination pre-copy, destination post-copy, separate same-size draw target.\n"
+    "upload-snapshots.jsonl: preceding buffer-to-image upload into the chosen copy source, with bounded buffer dump (if fully readable) and PNGs before/after upload.\n"
+    "An upload buffer dump is not a confirmed buffer-image region: offsets, row pitch and memory layout require independent inspection.\n"
     "material-textures.jsonl: selected BC1/BC5 material views and DDS/PNG content.\n"
     "shader-artifacts.jsonl: selected original fragment SPIR-V/binary metadata.\n"
     "PNG is a [0,8] SDR preview; EXR may preserve HDR. BC DDS preserves blocks.\n"
@@ -917,6 +920,98 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
                      << "\"note\":\"Pixel difference is descriptive, not proof of corruption: partial copy regions or format interpretation can differ; same-size draw is not a verified producer; empty PNG means unavailable\"}\n";
     ++presentCopiesAttempted;
     break;
+  }
+
+  // Follow the input to the chosen final RGBA8 copy back to a preceding
+  // buffer-to-image upload in the same capture. Copy metadata comes from
+  // RenderDoc's ActionDescription, never guessed from event numbers.
+  size_t uploadCandidatesAttempted = 0, uploadBufferDumpsSaved = 0;
+  if(presentCopiesAttempted != 0)
+  {
+    for(size_t n = actions.size(); n > 1 && uploadCandidatesAttempted == 0; --n)
+    {
+      const size_t copyIndex = n - 1;
+      const ActionRow &copy = actions[copyIndex];
+      if((copy.name.find("CopyImage") == std::string::npos &&
+          copy.name.find("BlitImage") == std::string::npos) ||
+         copy.copySource == ResourceId() || copy.copyDestination == ResourceId())
+        continue;
+      const TextureDescription *dstImage = aiFindTexture(textures, copy.copySource);
+      if(!dstImage || dstImage->depth != 1 || dstImage->width > 4096 ||
+         dstImage->height > 4096 || !dstImage->width || !dstImage->height)
+        continue;
+      // Only the same source selected for the presentation-copy export.
+      const uint32_t expectedPresentEvent = 0; // Selection below uses the exported index.
+      (void)expectedPresentEvent;
+      // Find the closest earlier buffer-to-image upload to this image.
+      for(size_t u = copyIndex; u > 1; --u)
+      {
+        const ActionRow &upload = actions[u - 1];
+        if(upload.name.find("CopyBufferToImage") == std::string::npos ||
+           upload.copyDestination != copy.copySource)
+          continue;
+        const BufferDescription *buffer = nullptr;
+        for(const auto &item : buffers)
+          if(item.resourceId == upload.copySource) { buffer = &item; break; }
+        const uint32_t beforeEvent = actions[u - 2].eventId;
+        if(!beforeEvent || beforeEvent >= upload.eventId)
+          continue;
+
+        const std::string prefix = "upload_" + std::to_string(upload.eventId);
+        checkpoint("AI export: before buffer-to-image upload");
+        controller->SetFrameEvent(beforeEvent, false);
+        const std::string beforeImage = aiSaveImage(folder, prefix + "_image_before",
+                                                    *dstImage, FileType::PNG, 12 * 1024 * 1024);
+        // Full-buffer read is only attempted for a small buffer. The copy's
+        // bufferOffset, bufferRowLength, bufferImageHeight, and region list are
+        // not inferred from the ActionDescription.
+        const size_t maxBufferDump = 16U * 1024U * 1024U;
+        std::string bufferFile;
+        size_t dumpedBytes = 0;
+        if(buffer && buffer->length > 0 && buffer->length <= maxBufferDump)
+        {
+          checkpoint("AI export: source GetBufferData before upload");
+          const bytebuf raw = controller->GetBufferData(buffer->resourceId, 0, buffer->length);
+          if(raw.size() == buffer->length)
+          {
+            bufferFile = prefix + "_buffer.bin";
+            const std::string fullpath = folder + "/" + bufferFile;
+            std::ofstream binary(fullpath, std::ios::binary | std::ios::trunc);
+            binary.write(reinterpret_cast<const char *>(raw.data()),
+                         static_cast<std::streamsize>(raw.size()));
+            binary.close();
+            if(binary.good())
+            {
+              dumpedBytes = raw.size();
+              ++uploadBufferDumpsSaved;
+            }
+            else
+            {
+              std::remove(fullpath.c_str());
+              bufferFile.clear();
+            }
+          }
+        }
+        checkpoint("AI export: after buffer-to-image upload");
+        controller->SetFrameEvent(upload.eventId, false);
+        const std::string afterImage = aiSaveImage(folder, prefix + "_image_after",
+                                                   *dstImage, FileType::PNG, 12 * 1024 * 1024);
+        uploadSnapshots << "{\"event_id\":" << upload.eventId
+                        << ",\"before_event_id\":" << beforeEvent
+                        << ",\"copy_source_buffer_id\":" << aiQuote(aiId(upload.copySource))
+                        << ",\"copy_destination_image_id\":" << aiQuote(aiId(upload.copyDestination))
+                        << ",\"source_buffer_total_bytes\":" << (buffer ? buffer->length : 0)
+                        << ",\"source_buffer_dump_bytes\":" << dumpedBytes
+                        << ",\"source_buffer_file\":" << aiQuote(bufferFile)
+                        << ",\"image_before_png\":" << aiQuote(beforeImage)
+                        << ",\"image_after_png\":" << aiQuote(afterImage)
+                        << ",\"buffer_image_regions_known\":false"
+                        << ",\"note\":\"Full buffer starts at offset 0, but Vulkan copy region offsets/pitches are not reconstructed. Missing files mean unsupported readback, not zero pixels.\"}\n";
+        ++uploadCandidatesAttempted;
+        break;
+      }
+      if(uploadCandidatesAttempted) break;
+    }
   }
 
   checkpoint("AI export: Vulkan pipeline samples");
@@ -1217,6 +1312,8 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
            << "\"hdr_draw_pairs_attempted\":" << hdrPairsExported << ","
            << "\"present_copy_candidates_attempted\":" << presentCopiesAttempted << ","
            << "\"present_images_saved\":" << presentImagesSaved << ","
+           << "\"upload_candidates_attempted\":" << uploadCandidatesAttempted << ","
+           << "\"upload_full_buffer_dumps_saved\":" << uploadBufferDumpsSaved << ","
            << "\"bc_material_textures_attempted\":" << bcAssetsExported << ","
            << "\"fragment_shader_binaries_attempted\":" << fragmentBinariesExported << ","
            << "\"accessed_descriptors_exported\":" << descriptorRows << ","
@@ -1227,11 +1324,11 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   // Explicitly flush/check all files before telling Java the ZIP is ready.
   events.flush(); resourceFile.flush(); textureFile.flush(); bufferFile.flush();
   uses.flush(); pipeline.flush(); shaders.flush(); messages.flush();
-  descriptorDetails.flush(); hdrSnapshots.flush(); presentSnapshots.flush(); materialTextures.flush(); shaderArtifacts.flush();
+  descriptorDetails.flush(); hdrSnapshots.flush(); presentSnapshots.flush(); uploadSnapshots.flush(); materialTextures.flush(); shaderArtifacts.flush();
   manifest.flush(); readme.flush();
   if(!events || !resourceFile || !textureFile || !bufferFile || !uses ||
      !pipeline || !shaders || !messages || !descriptorDetails ||
-     !hdrSnapshots || !presentSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
+     !hdrSnapshots || !presentSnapshots || !uploadSnapshots || !materialTextures || !shaderArtifacts || !manifest || !readme)
     return env->NewStringUTF("ERROR:Filesystem error while writing diagnostic files");
 
   checkpoint("AI export: files complete");
