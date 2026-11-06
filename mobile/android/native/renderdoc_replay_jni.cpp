@@ -800,6 +800,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   // This selects the last image copy with compatible RGBA8 source/destination.
   // It is only a candidate presentation copy, not proof of a swapchain path.
   size_t presentCopiesAttempted = 0, presentImagesSaved = 0;
+  size_t selectedCopyIndex = actions.size();
   for(size_t n = actions.size(); n > 1; --n)
   {
     const size_t copyIndex = n - 1;
@@ -918,6 +919,7 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
                      << ",\"other_draw_after_png\":" << aiQuote(otherAfter)
                      << ",\"classification\":\"last_rgba8_image_copy_candidate\","
                      << "\"note\":\"Pixel difference is descriptive, not proof of corruption: partial copy regions or format interpretation can differ; same-size draw is not a verified producer; empty PNG means unavailable\"}\n";
+    selectedCopyIndex = copyIndex;
     ++presentCopiesAttempted;
     break;
   }
@@ -926,25 +928,15 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
   // buffer-to-image upload in the same capture. Copy metadata comes from
   // RenderDoc's ActionDescription, never guessed from event numbers.
   size_t uploadCandidatesAttempted = 0, uploadBufferDumpsSaved = 0;
-  if(presentCopiesAttempted != 0)
+  if(selectedCopyIndex < actions.size())
   {
-    for(size_t n = actions.size(); n > 1 && uploadCandidatesAttempted == 0; --n)
+    const ActionRow &copy = actions[selectedCopyIndex];
+    const TextureDescription *dstImage = aiFindTexture(textures, copy.copySource);
+    if(dstImage)
     {
-      const size_t copyIndex = n - 1;
-      const ActionRow &copy = actions[copyIndex];
-      if((copy.name.find("CopyImage") == std::string::npos &&
-          copy.name.find("BlitImage") == std::string::npos) ||
-         copy.copySource == ResourceId() || copy.copyDestination == ResourceId())
-        continue;
-      const TextureDescription *dstImage = aiFindTexture(textures, copy.copySource);
-      if(!dstImage || dstImage->depth != 1 || dstImage->width > 4096 ||
-         dstImage->height > 4096 || !dstImage->width || !dstImage->height)
-        continue;
-      // Only the same source selected for the presentation-copy export.
-      const uint32_t expectedPresentEvent = 0; // Selection below uses the exported index.
-      (void)expectedPresentEvent;
-      // Find the closest earlier buffer-to-image upload to this image.
-      for(size_t u = copyIndex; u > 1; --u)
+      // Find the nearest earlier buffer-to-image upload into the exact
+      // ResourceId selected above as the presentation-copy source.
+      for(size_t u = selectedCopyIndex; u > 1; --u)
       {
         const ActionRow &upload = actions[u - 1];
         if(upload.name.find("CopyBufferToImage") == std::string::npos ||
@@ -1010,7 +1002,6 @@ Java_org_renderdoc_mobile_ReplayActivity_nativeExportAI(JNIEnv *env, jclass,
         ++uploadCandidatesAttempted;
         break;
       }
-      if(uploadCandidatesAttempted) break;
     }
   }
 
