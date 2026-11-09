@@ -1,5 +1,42 @@
 # RenderDoc Mobile — Android ARM64 inspector and Vulkan replay
 
+## New: lightweight RDC/ZIP diagnostics — no replay (PR Draft #1)
+
+The **Export lightweight RDC/ZIP metadata (.zip)** button does not use
+the replay process, does not initialise Vulkan, and does not copy the
+240 MB capture into the application's Documents folder.
+
+1. Tap **Export lightweight RDC/ZIP metadata (.zip)** on the home screen.
+2. Pick either a raw **.rdc** or the **original ZIP from Strato** containing
+   the RDC (for example `strato-frame_frame784.zip`).
+3. Choose an output file such as `zelda-frame784-light-diagnostics.zip`.
+4. Share the small result ZIP and the matching Strato `emulation.log`.
+
+The app streams only the RDC header and the **first binary section
+header**. It exports `capture-metadata.json`, an optional
+`capture-preview.jpg`, and `limitations.txt`. The JSON includes
+RenderDoc serialisation/build, Vulkan driver API ID, machine identifier,
+thumbnail dimensions, the first section name/flags, and compressed and
+uncompressed byte counts. It **does not determine** whether the GPU
+driver is Mesa Turnip or proprietary Qualcomm; verify that in Strato's
+log. It **does not recover** draw call states, descriptors, vertex data,
+shaders, clipping statistics or Post-VS positions. Those require later
+RDC decoding/replay work.
+
+For a ZIP, the parser reads only the first RDC member's header, not
+the entire zipped framecapture. Memory is bounded to a 16 MB header,
+up to 2 MB of thumbnail retained for export, and small buffers. For
+unknown or malformed files it rejects implausible lengths rather than
+attempting to decompress/replay a 1.63 GB Vulkan frame. Normal replay
+and AI export buttons are unchanged. This is a safe first diagnostic
+step, not a replacement for GPU replay.
+
+Host-only regression tests: `mobile/android/tests/RdcLiteParserTest.java`,
+run in CI before the native Android build. Validate the new APK on
+Android and confirm the exported metadata matches the known RDC,
+without attempting Vulkan replay.
+
+
 Version 0.3.0 adds an **experimental real Vulkan GPU replay** path to the standalone RenderDoc Mobile app. The existing metadata reader and app-local Vulkan capture test are retained.
 
 ## Open and replay a capture
