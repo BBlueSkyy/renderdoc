@@ -29,6 +29,16 @@ jobs:
           distribution: zulu
           java-version: '8'
 
+      - name: Test lightweight RDC parser (no Android SDK or Vulkan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rdc-lite-classes
+          javac -source 8 -target 8 -d /tmp/rdc-lite-classes \
+            mobile/android/src/org/renderdoc/mobile/RdcLiteParser.java \
+            mobile/android/tests/RdcLiteParserTest.java
+          java -cp /tmp/rdc-lite-classes org.renderdoc.mobile.RdcLiteParserTest
+
       - name: Install upstream Android build prerequisites
         shell: bash
         run: |
