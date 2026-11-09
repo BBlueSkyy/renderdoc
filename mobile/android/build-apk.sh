@@ -49,6 +49,7 @@ javac -source 7 -target 7 \
   -bootclasspath "$JAVA_HOME/jre/lib/rt.jar" \
   -classpath "$JAR" -d "$STAGE/obj" \
   "$APP/src/org/renderdoc/mobile/MainActivity.java" \
+  "$APP/src/org/renderdoc/mobile/RdcLiteParser.java" \
   "$APP/src/org/renderdoc/mobile/DemoCaptureActivity.java" \
   "$APP/src/org/renderdoc/mobile/ReplayActivity.java" \
   "$APP/src/org/renderdoc/mobile/ReplayDiagnostics.java" \
