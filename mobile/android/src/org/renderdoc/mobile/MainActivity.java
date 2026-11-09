@@ -39,6 +39,8 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final int REQUEST_CAPTURE = 1001;
     private static final int REQUEST_REPLAY_DIAGNOSTICS = 1002;
+    private static final int REQUEST_LITE_SOURCE = 1003;
+    private static final int REQUEST_LITE_OUTPUT = 1004;
     private static final int BACKGROUND = Color.rgb(21, 24, 29);
     private static final int PANEL = Color.rgb(34, 39, 47);
     private static final int MUTED = Color.rgb(170, 179, 194);
@@ -51,9 +53,12 @@ public final class MainActivity extends Activity {
     private Button openButton;
     private Button replayButton;
     private Button aiExportButton;
+    private Button liteExportButton;
     private Button diagnosticsButton;
     private TextView diagnosticsSummary;
     private File currentReplayCapture;
+    private Uri liteSourceUri;
+    private String liteSourceName;
     private volatile boolean closing;
 
     private static final String NATIVE_LOAD_ERROR;
@@ -111,6 +116,27 @@ public final class MainActivity extends Activity {
         demoButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 startActivity(new Intent(MainActivity.this, DemoCaptureActivity.class));
+            }
+        });
+
+        // This path opens the original ZIP or RDC through the Android document
+        // provider and reads only ~the RDC header. No bulk app import, GPU replay,
+        // RenderDoc core, or 1+ GB Vulkan memory reconstruction is required.
+        liteExportButton = new Button(this);
+        liteExportButton.setAllCaps(false);
+        liteExportButton.setText("Export lightweight RDC/ZIP metadata (.zip)");
+        liteExportButton.setTextColor(Color.WHITE);
+        LinearLayout.LayoutParams liteParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(54));
+        liteParams.topMargin = dp(10);
+        page.addView(liteExportButton, liteParams);
+        liteExportButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                Intent select = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                select.setType("*/*");
+                select.addCategory(Intent.CATEGORY_OPENABLE);
+                select.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivityForResult(select, REQUEST_LITE_SOURCE);
             }
         });
 
@@ -256,6 +282,60 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == REQUEST_LITE_SOURCE) {
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            liteSourceUri = data.getData();
+            liteSourceName = getDocumentName(liteSourceUri);
+            String stem = liteSourceName.replaceAll("(?i)\\.(rdc|zip)$", "");
+            Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            save.setType("application/zip");
+            save.addCategory(Intent.CATEGORY_OPENABLE);
+            save.putExtra(Intent.EXTRA_TITLE, stem + "-light-diagnostics.zip");
+            startActivityForResult(save, REQUEST_LITE_OUTPUT);
+            return;
+        }
+        if (request == REQUEST_LITE_OUTPUT) {
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            final Uri source = liteSourceUri;
+            final String filename = liteSourceName;
+            final Uri target = data.getData();
+            liteSourceUri = null;
+            liteSourceName = null;
+            if (source == null || filename == null) return;
+            liteExportButton.setEnabled(false);
+            status.setText("Inspecting RDC header without replay...");
+            executor.execute(new Runnable() {
+                @Override public void run() {
+                    try (InputStream input = getContentResolver().openInputStream(source);
+                         OutputStream output = getContentResolver().openOutputStream(target)) {
+                        if (input == null || output == null)
+                            throw new IOException("The document provider could not open the selected file.");
+                        RdcLiteParser.export(input, filename, output);
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if (closing) return;
+                                liteExportButton.setEnabled(true);
+                                status.setText("Lightweight metadata ZIP exported");
+                                details.setText("Only the RDC header, first section and embedded preview " +
+                                        "were read. No GPU replay was started. Share the small ZIP " +
+                                        "with emulation.log; it does not include draw states or Post-VS.");
+                            }
+                        });
+                    } catch (final Throwable failure) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if (closing) return;
+                                liteExportButton.setEnabled(true);
+                                status.setText("Lightweight export failed");
+                                details.setText(failure.toString() +
+                                        "\nThe source RDC/ZIP remains unchanged.");
+                            }
+                        });
+                    }
+                }
+            });
+            return;
+        }
         if (request == REQUEST_REPLAY_DIAGNOSTICS) {
             if (result != RESULT_OK || data == null || data.getData() == null) return;
             final Uri destination = data.getData();
