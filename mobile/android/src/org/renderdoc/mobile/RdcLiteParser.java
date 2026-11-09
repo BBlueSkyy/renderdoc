@@ -194,7 +194,13 @@ public final class RdcLiteParser {
         BufferedInputStream buffered = new BufferedInputStream(source, 64 * 1024);
         buffered.mark(8);
         byte[] magic = new byte[4];
-        int count = buffered.read(magic);
+        int count = 0;
+        while(count < magic.length) {
+            int n = buffered.read(magic, count, magic.length - count);
+            if(n < 0) break;
+            if(n == 0) break;
+            count += n;
+        }
         buffered.reset();
         if(count != 4) throw new IOException("Empty or truncated capture");
         if(magic[0] == 'P' && magic[1] == 'K' && magic[2] == 3 && magic[3] == 4) {
